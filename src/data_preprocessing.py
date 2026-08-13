@@ -113,7 +113,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df['atr_14'] = atr
     # 填補前 13 天之缺失值 (Bfill)，確保無 NaN/0.0，最差保底為 1.0
     df['atr_14'] = df['atr_14'].replace(0.0, np.nan).bfill()
-    df['atr_14'] = df['atr_14'].fillna(method='bfill').fillna(1.0)
+    df['atr_14'] = df['atr_14'].bfill().fillna(1.0)
 
     df['BIAS'] = (df['Close'] - df['MA_20']) / df['MA_20']
     df['BIAS_mean_60'] = df['BIAS'].rolling(window=60).mean()
