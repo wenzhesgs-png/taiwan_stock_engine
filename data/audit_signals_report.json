@@ -1,0 +1,125 @@
+{
+  "timestamp": "2026-08-13T11:44:13",
+  "audit_results": [
+    {
+      "target_date": "2026-01-02",
+      "actual_trading_date": "2026-01-02",
+      "action_type": "BUY",
+      "p_conj": 0.1503,
+      "p_ref": 0.7905,
+      "z_bias": -0.8648,
+      "gsi": 78.9232,
+      "status": "[MODEL_BLIND]"
+    },
+    {
+      "target_date": "2026-01-13",
+      "actual_trading_date": "2026-01-13",
+      "action_type": "SELL",
+      "p_conj": 0.3253,
+      "p_ref": 0.3534,
+      "z_bias": 3.3471,
+      "gsi": 4.9863,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-03-04",
+      "actual_trading_date": "2026-03-04",
+      "action_type": "BUY",
+      "p_conj": 0.9529,
+      "p_ref": 0.6897,
+      "z_bias": -1.4378,
+      "gsi": 4.0897,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-04-22",
+      "actual_trading_date": "2026-04-22",
+      "action_type": "SELL",
+      "p_conj": 0.0451,
+      "p_ref": 0.255,
+      "z_bias": 2.2987,
+      "gsi": 2.6185,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-05-04",
+      "actual_trading_date": "2026-05-04",
+      "action_type": "BUY",
+      "p_conj": 0.8951,
+      "p_ref": 0.6094,
+      "z_bias": -0.2877,
+      "gsi": 3.107,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-05-11",
+      "actual_trading_date": "2026-05-11",
+      "action_type": "SELL",
+      "p_conj": 0.0623,
+      "p_ref": 0.1049,
+      "z_bias": 1.2056,
+      "gsi": 3.2716,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-05-15",
+      "actual_trading_date": "2026-05-15",
+      "action_type": "BUY",
+      "p_conj": 0.9658,
+      "p_ref": 0.8333,
+      "z_bias": -0.9847,
+      "gsi": 3.2922,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-06-03",
+      "actual_trading_date": "2026-06-03",
+      "action_type": "SELL",
+      "p_conj": 0.0883,
+      "p_ref": 0.1722,
+      "z_bias": 2.1631,
+      "gsi": 3.675,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-06-08",
+      "actual_trading_date": "2026-06-08",
+      "action_type": "BUY",
+      "p_conj": 0.9515,
+      "p_ref": 0.8358,
+      "z_bias": -0.8545,
+      "gsi": 3.4922,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-06-23",
+      "actual_trading_date": "2026-06-23",
+      "action_type": "SELL",
+      "p_conj": 0.0912,
+      "p_ref": 0.2186,
+      "z_bias": 3.2404,
+      "gsi": 6.1178,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-06-26",
+      "actual_trading_date": "2026-06-26",
+      "action_type": "BUY",
+      "p_conj": 0.8649,
+      "p_ref": 0.7226,
+      "z_bias": -0.0927,
+      "gsi": 5.7814,
+      "status": "[SIGNAL_OK]"
+    },
+    {
+      "target_date": "2026-07-09",
+      "actual_trading_date": "2026-07-09",
+      "action_type": "SELL",
+      "p_conj": 0.0485,
+      "p_ref": 0.0901,
+      "z_bias": 0.1131,
+      "gsi": 4.7288,
+      "status": "[SIGNAL_OK]"
+    }
+  ]
+}

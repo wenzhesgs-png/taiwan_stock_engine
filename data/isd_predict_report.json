@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-08-13T11:44:28",
+  "stockId": "2379.TW",
+  "status": "BLOCKED_BY_GSI",
+  "isdTriggered": true,
+  "suggestedPosition": 0.0,
+  "prediction": {
+    "pRef": 0.3971,
+    "pConj": 0.73,
+    "predictedChipFlow": null,
+    "predictedAlphaReturn": 0.0428
+  },
+  "riskMetrics": {
+    "dqixStatus": "PASSED",
+    "riValue": 0.6671,
+    "riThreshold": 0.6,
+    "gsiValue": 3.4558,
+    "gsiThreshold": 3.0
+  },
+  "actionableAdvice": "❌ 風控阻斷：偵測到黑天鵝或未知常態空間偏離，全域相似度指數 GSI (3.46) 超過安全門檻 (3.00)，系統強制觀望。"
+}

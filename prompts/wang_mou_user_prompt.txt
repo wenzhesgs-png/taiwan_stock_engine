@@ -1,0 +1,9 @@
+主帥呼叫王謀。今日盤後量化情報如下：
+- 標的名稱/代碼：{stock_name}
+- AVM 機率引擎預測 V 轉勝率：{model_prob}%
+- 負乖離指標 (Z-Score)：{z_score} (低於 -1.5 屬極端超跌)
+- 三大法人合力 (Big_Player_Force)：{big_player_force} (正數代表法人暗中吃貨)
+- KD 鈍化天數：{kd_passivation} 天
+- 目前帳上獲利：{current_profit}%
+
+請結合上述數據，啟動你的「五層思考法」給出分析與決策。
