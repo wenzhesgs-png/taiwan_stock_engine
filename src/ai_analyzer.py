@@ -1,7 +1,5 @@
 import os
 import json
-import pandas as pd
-import numpy as np
 import google.genai as genai
 from google.genai import types
 
@@ -9,105 +7,53 @@ from google.genai import types
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
 client = genai.Client(api_key=API_KEY if API_KEY else "dummy_key_for_init", http_options={'timeout': 10.0})
 
-def _parse_raw_price_data(raw_data_path: str) -> pd.DataFrame:
-    """解析 yfinance 下載的 raw_2379.csv 數據"""
-    if not os.path.exists(raw_data_path):
-        return pd.DataFrame()
-    try:
-        raw_df = pd.read_csv(raw_data_path, header=None)
-        header_idx = 0
-        for idx, row in raw_df.head(5).iterrows():
-            row_str = [str(x).strip() for x in row.values]
-            if 'Close' in row_str and 'Open' in row_str:
-                header_idx = idx
-                break
-        df_price = pd.read_csv(raw_data_path, header=header_idx)
-        if isinstance(df_price.columns, pd.MultiIndex):
-            df_price.columns = df_price.columns.get_level_values(0)
-        df_price.columns = [str(col).strip() for col in df_price.columns]
-        df_price.rename(columns={df_price.columns[0]: 'Date'}, inplace=True)
-        df_price = df_price.dropna(subset=['Close'])
-        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            if col in df_price.columns:
-                df_price[col] = pd.to_numeric(df_price[col], errors='coerce')
-        df_price = df_price.dropna(subset=['Close'])
-        df_price['Date'] = pd.to_datetime(df_price['Date'], errors='coerce')
-        df_price = df_price[df_price['Date'].notnull()].sort_values('Date')
-        return df_price
-    except Exception:
-        return pd.DataFrame()
-
-def compute_technical_summary(df_price: pd.DataFrame) -> tuple[float, str]:
-    """
-    從價格數據中計算最新收盤價及 KD / MACD 狀態摘要
-    """
-    if df_price.empty:
-        return 0.0, "數據不足"
-    
-    latest_row = df_price.iloc[-1]
-    close_val = round(float(latest_row['Close']), 2)
-    
-    # 計算 KD (9, 3, 3)
-    try:
-        df = df_price.copy()
-        low_9 = df['Low'].rolling(window=9).min()
-        high_9 = df['High'].rolling(window=9).max()
-        df['RSV'] = np.where(high_9 != low_9, (df['Close'] - low_9) / (high_9 - low_9) * 100, 50)
-        df['K'] = df['RSV'].ewm(alpha=1/3, adjust=False).mean()
-        df['D'] = df['K'].ewm(alpha=1/3, adjust=False).mean()
-        
-        latest_k = round(float(df['K'].iloc[-1]), 1)
-        latest_d = round(float(df['D'].iloc[-1]), 1)
-        
-        kd_status = "低檔超賣" if latest_k < 20 else ("高檔超買" if latest_k > 80 else "中性震盪")
-        kd_summary = f"KD {kd_status} (K={latest_k}, D={latest_d})"
-    except Exception:
-        kd_summary = "KD 狀態未明"
-
-    # 計算 MACD (12, 26, 9)
-    try:
-        close_series = df_price['Close']
-        ema12 = close_series.ewm(span=12, adjust=False).mean()
-        ema26 = close_series.ewm(span=26, adjust=False).mean()
-        macd_val = ema12 - ema26
-        signal_val = macd_val.ewm(span=9, adjust=False).mean()
-        hist_val = macd_val - signal_val
-        
-        latest_macd = round(float(macd_val.iloc[-1]), 2)
-        latest_sig = round(float(signal_val.iloc[-1]), 2)
-        latest_hist = round(float(hist_val.iloc[-1]), 2)
-        
-        macd_status = "多頭增強" if latest_hist > 0 else "空頭收斂"
-        macd_summary = f"MACD {macd_status} (Hist={latest_hist})"
-    except Exception:
-        macd_summary = "MACD 狀態未明"
-
-    tech_summary = f"{kd_summary} / {macd_summary}"
-    return close_val, tech_summary
-
 def run_ai_analysis(
-    raw_data_path: str = "data/raw_2379.csv",
+    latest_features: dict,
     report_path: str = "data/llm_agent_report.json"
 ) -> dict:
     """
-    執行 AI qualitative 戰術分析 (TICKET-FIX-AI)
-    - 載入歷史數據，計算最新收盤價與 KD/MACD 指標
-    - 調用 Gemini API 生成包含價格與百分比的隔日交易計畫
-    - 支援 10s Timeout、JSON 補防與 Fallback 降級保護
+    執行 AI qualitative 戰術 analysis (TICKET-FIX-AI-MEM)
+    - 記憶體直接注入：接收已計算好的特徵字典，無硬碟路徑相依。
+    - 嚴格的 Fail-Fast 資料驗證門禁。
+    - 支援 10s Timeout 與 Fallback 降級保護。
     """
-    df_price = _parse_raw_price_data(raw_data_path)
+    # 1. Fail-Fast 阻斷門禁
+    if not latest_features:
+        raise ValueError("最新特徵資料不能為空")
+        
+    date = latest_features.get("date")
+    close = latest_features.get("close")
+    kd_summary = latest_features.get("kd_summary")
+    macd_summary = latest_features.get("macd_summary")
     
-    close_val = 0.0
-    tech_summary = "數據載入異常"
-    latest_date = "YYYY-MM-DD"
+    if not date or str(date).strip() == "":
+        raise ValueError("最新特徵資料中缺乏 'date' 欄位或日期為空值")
     
-    if not df_price.empty:
-        close_val, tech_summary = compute_technical_summary(df_price)
-        latest_date = df_price.iloc[-1]['Date'].strftime('%Y-%m-%d')
-    
-    # 1. 準備保底降級回覆 (Fallback Response)
+    if close is None:
+        raise ValueError("最新特徵資料中缺乏 'close' 欄位")
+        
+    try:
+        close_val = float(close)
+    except (ValueError, TypeError):
+        raise ValueError(f"收盤價格式不合規且無法轉換為浮點數: {close}")
+        
+    if close_val <= 0:
+        raise ValueError(f"收盤價異常，必須為大於 0 的正數: {close_val}")
+        
+    if not kd_summary or str(kd_summary).strip() == "":
+        raise ValueError("技術指標 'kd_summary' 欄位遺失或為空值")
+        
+    if not macd_summary or str(macd_summary).strip() == "":
+        raise ValueError("技術指標 'macd_summary' 欄位遺失或為空值")
+
+    # 2. 構造技術摘要
+    kd_part = kd_summary.split('(')[1].split(')')[0] if '(' in str(kd_summary) else str(kd_summary)
+    macd_part = macd_summary.split('(')[1].split(')')[0] if '(' in str(macd_summary) else str(macd_summary)
+    tech_summary = f"KD: {kd_part.strip()} / MACD: {macd_part.strip()}"
+
+    # 3. 準備保底降級回覆 (Fallback Response)
     fallback_res = {
-        "date": latest_date,
+        "date": str(date).strip(),
         "close": close_val,
         "technical_summary": tech_summary,
         "win_rate": 50,
@@ -120,13 +66,13 @@ def run_ai_analysis(
         "llm_fallback": True
     }
 
-    # 2. 檢查 API Key 缺失
+    # 4. 檢查 API Key 缺失
     current_key = API_KEY or os.environ.get("GEMINI_API_KEY", "")
     if not current_key or current_key == "":
         _write_report_file(fallback_res, report_path)
         return fallback_res
 
-    # 3. 構建軍師王謀定性分析 Prompt
+    # 5. 構建軍師王謀定性分析 Prompt
     system_instruction = (
         "你名叫「王謀」，是股市最倚重的首席戰術軍師。\n"
         "請根據主帥提供的盤後價格與技術面指標，執行極富進攻性的「五層思考定性分析」，並制定明天的交易作戰計畫。\n"
@@ -136,9 +82,9 @@ def run_ai_analysis(
     user_prompt = f"""
     主帥提供最新盤後情報：
     • 標的名稱/代碼：瑞昱 2379.TW
-    • 數據截止日期：{latest_date}
+    • 數據截止日期：{date}
     • 今日收盤價：{close_val} 元
-    • 技術指標狀態：{tech_summary}
+    • 技術指標狀態：KD - {kd_summary} / MACD - {macd_summary}
     
     請結合上述數據制定明天的事前交易觸發計畫：
     1. 評估「預估勝率 (win_rate, % 為 0 至 100 之間整數)」與「建議倉位 (suggested_position, 0.0 到 1.0 之間浮點數)」。
@@ -148,7 +94,7 @@ def run_ai_analysis(
     
     必須嚴格以下列 JSON 格式直接回覆：
     {{
-      "date": "{latest_date}",
+      "date": "{date}",
       "win_rate": 65,
       "action": "小資金試單 (搶V轉) / 觀望 / 進場",
       "suggested_position": 0.1,
@@ -159,7 +105,7 @@ def run_ai_analysis(
     }}
     """
 
-    # 4. 10 秒 Timeout 與 API 容錯
+    # 6. 10 秒 Timeout 與 API 容錯
     try:
         response = client.models.generate_content(
             model='gemini-3.6-flash',
@@ -182,9 +128,9 @@ def run_ai_analysis(
             
         data = json.loads(text)
         
-        # 5. JSON Schema 欄位缺失補防
+        # 7. JSON Schema 欄位缺失補防
         final_res = {
-            "date": str(data.get("date", latest_date)).strip(),
+            "date": str(data.get("date", date)).strip(),
             "close": close_val,
             "technical_summary": tech_summary,
             "win_rate": int(data.get("win_rate", 50)),
