@@ -35,18 +35,45 @@ def send_telegram_notification(
         print(f"⚠️ [Warning] 讀取或解析戰術報告檔案時發生錯誤 ({e})。將自動跳過。")
         return False
 
-    action = report_data.get("action", "無")
+    # 欄位缺失補防與解析
+    date = report_data.get("date", "YYYY-MM-DD")
+    close = report_data.get("close", 0.0)
+    technical_summary = report_data.get("technical_summary", "技術指標數據不足")
+    action = report_data.get("action", "觀望")
+    win_rate = report_data.get("win_rate", 50)
     suggested_position = report_data.get("suggested_position", 0.0)
+    entry_plan = report_data.get("entry_plan", "未設定")
+    exit_plan = report_data.get("exit_plan", "未設定")
+    gap_defense_note = report_data.get("gap_defense_note", "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價")
     wang_mou_analysis = report_data.get("wang_mou_analysis", "無分析內容")
-    llm_fallback = report_data.get("llm_fallback", False)
 
-    # 格式化為簡潔 Markdown
+    # 建議倉位轉換為百分比
+    try:
+        suggested_position_pct = float(suggested_position) * 100
+        if suggested_position_pct.is_integer():
+            suggested_position_pct = int(suggested_position_pct)
+        else:
+            suggested_position_pct = round(suggested_position_pct, 1)
+    except Exception:
+        suggested_position_pct = 0
+
+    # 格式化為高資訊密度 Markdown 排版 (去除 Debug 噪訊與括號變數)
     message = (
-        "🔔 *AI 股市預測與決策引擎 - 每日定性戰術報告*\n\n"
-        f"🎯 *決策動作 (action)*: {action}\n"
-        f"📈 *建議倉位 (suggested_position)*: {suggested_position}\n"
-        f"🧠 *軍師王謀定性診斷 (wang_mou_analysis)*: {wang_mou_analysis}\n"
-        f"🛡️ *LLM 降級狀態 (llm_fallback)*: {llm_fallback}"
+        "🔔 【AI 股市決策戰報 - 瑞昱 2379.TW】\n"
+        f"📅 數據截止日期：{date} 盤後\n\n"
+        "📊 盤後關鍵指標：\n"
+        f"• 收盤價：{close} 元\n"
+        f"• KD / MACD 狀態：{technical_summary}\n\n"
+        "🎯 軍師王謀戰術決策：\n"
+        f"• 動作建議：{action}\n"
+        f"• 預估勝率：{win_rate}%\n"
+        f"• 建議倉位：{suggested_position_pct}%\n\n"
+        "📝 隔日事前觸發計畫：\n"
+        f"• 🟢 進場條件：{entry_plan}\n"
+        f"• 🔴 出場條件：{exit_plan}\n"
+        f"• ⚠️ 跳空防守：{gap_defense_note}\n\n"
+        "🧠 軍師王謀定性診斷：\n"
+        f"{wang_mou_analysis}"
     )
 
     # 建構 Telegram API 呼叫 URL
@@ -65,7 +92,7 @@ def send_telegram_notification(
         with urllib.request.urlopen(req, timeout=5) as response:
             status_code = response.getcode()
             if status_code == 200:
-                print("✨ [Success] Telegram 戰術報告推播成功！")
+                print("✨ [Success] Telegram 戰術戰報推播成功！")
                 return True
             else:
                 print(f"⚠️ [Warning] Telegram 推播 API 回傳非 200 狀態碼: {status_code}。將自動跳過。")
