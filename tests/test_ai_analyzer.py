@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import pytest
 from unittest.mock import patch, MagicMock
@@ -11,8 +12,8 @@ def temp_report_file(tmp_path):
 @pytest.fixture
 def valid_features():
     return {
-        "date": "2026-08-14",
-        "close": 530.0,
+        "date": "2026-08-17",
+        "close": 714.0,
         "volume": 12500000,
         "kd_summary": "K: 25.4, D: 28.1 (低檔鈍化 / 潛在黃金交叉)",
         "macd_summary": "DIF: -2.1, MACD: -1.8, OSC: -0.3 (綠柱縮腳)"
@@ -68,15 +69,15 @@ def test_ai_analyzer_fail_fast_missing_macd(valid_features):
 
 @patch("src.ai_analyzer.genai.Client")
 def test_ai_analyzer_success(mock_client_class, valid_features, temp_report_file):
-    """情境 1：API 調用成功，返回合規之輸出"""
+    """情境 1：API 首次調用成功，返回合規之輸出"""
     mock_response_text = """
     {
-      "date": "2026-08-14",
+      "date": "2026-08-17",
       "win_rate": 65,
       "action": "小資金試單 (搶V轉)",
       "suggested_position": 0.1,
-      "entry_plan": "回測至 $515 (-2.8%) 考慮試單進場",
-      "exit_plan": "達 $560 (+5.6%) 停利 / 跌破 $500 (-5.6%) 嚴格停損",
+      "entry_plan": "回測至 $692.6 (-3.0%) 考慮進場",
+      "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
       "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
       "wang_mou_analysis": "主力多頭洗盤，指標高檔，王謀定性建議小資金摸底試單。"
     }
@@ -88,54 +89,88 @@ def test_ai_analyzer_success(mock_client_class, valid_features, temp_report_file
     with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
         res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
         
-        assert res["date"] == "2026-08-14"
-        assert res["close"] == 530.0
+        assert res["date"] == "2026-08-17"
+        assert res["close"] == 714.0
         assert res["win_rate"] == 65
         assert res["action"] == "小資金試單 (搶V轉)"
         assert res["suggested_position"] == 0.1
-        assert "515" in res["entry_plan"]
-        assert "560" in res["exit_plan"]
+        assert "692.6" in res["entry_plan"]
+        assert "749.7" in res["exit_plan"]
         assert "跳空" in res["gap_defense_note"]
         assert "王謀定性建議" in res["wang_mou_analysis"]
         assert res["llm_fallback"] is False
-        # 驗證 technical_summary 的括號內容提取與組合
         assert res["technical_summary"] == "KD: 低檔鈍化 / 潛在黃金交叉 / MACD: 綠柱縮腳"
 
 
 @patch("src.ai_analyzer.genai.Client")
-def test_ai_analyzer_api_error_fallback(mock_client_class, valid_features, temp_report_file, capsys):
-    """情境 2：API 逾時或報錯時，測試 Fallback 且向 sys.stderr 輸出結構化錯誤日誌"""
+@patch("time.sleep")
+def test_ai_analyzer_retry_success(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
+    """情境 2：首次 API 調用逾時，第 2 次重試成功"""
+    mock_response_text = """
+    {
+      "date": "2026-08-17",
+      "win_rate": 65,
+      "action": "小資金試單 (搶V轉)",
+      "suggested_position": 0.1,
+      "entry_plan": "回測至 692.6 (-3.0%) 考慮進場",
+      "exit_plan": "達 749.7 (+5.0%) 停利 / 跌破 678.3 (-5.0%) 嚴格停損",
+      "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
+      "wang_mou_analysis": "主力多頭洗盤，指標高檔，王謀定性建議小資金摸底試單。"
+    }
+    """
     mock_client = MagicMock()
-    mock_client.models.generate_content.side_effect = Exception("API Connection Timeout")
+    # 第一回拋出逾時 Exception，第二回成功回傳
+    mock_client.models.generate_content.side_effect = [
+        Exception("ReadTimeout"),
+        MagicMock(text=mock_response_text)
+    ]
     mock_client_class.return_value = mock_client
     
     with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
         res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
         
-        assert res["date"] == "2026-08-14"  # 真實日期
-        assert res["close"] == 530.0         # 真實最新收盤價
-        assert "KD: 低檔鈍化 / 潛在黃金交叉" in res["technical_summary"] # 真實指標
-        assert res["win_rate"] == 50
-        assert res["action"] == "觀望"
-        assert res["suggested_position"] == 0.0
-        assert "514.1" in res["entry_plan"]  # 基於真實收盤價 530 * 0.97 計算
-        assert "556.5" in res["exit_plan"]   # 基於真實收盤價 530 * 1.05 計算
-        assert "防禦性降級" in res["wang_mou_analysis"]
-        assert res["llm_fallback"] is True
+        assert res["date"] == "2026-08-17"
+        assert res["close"] == 714.0
+        assert res["win_rate"] == 65
+        assert res["llm_fallback"] is False
         
-        # 驗證 sys.stderr 輸出
+        # 驗證 time.sleep(2) 被調用了一次
+        mock_sleep.assert_called_once_with(2)
+        
+        # 驗證 sys.stderr 輸出重試警告
         captured = capsys.readouterr()
-        assert "[ERROR] Gemini API Failed: Exception - API Connection Timeout" in captured.err
+        assert "[Warning] Gemini API Failed on first attempt: Exception - ReadTimeout" in captured.err
 
 
-def test_ai_analyzer_missing_api_key_fallback(valid_features, temp_report_file, capsys):
-    """測試當 GEMINI_API_KEY 缺失時，安全回傳技術面保底戰報且向 sys.stderr 輸出警告"""
+@patch("src.ai_analyzer.genai.Client")
+@patch("time.sleep")
+def test_ai_analyzer_retry_fail_throws_exception(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
+    """情境 3：第 2 次重試依然失敗，Fail-Fast 直接拋出例外中斷且向 sys.stderr 輸出 [ERROR]"""
+    mock_client = MagicMock()
+    # 兩次皆拋出錯誤
+    mock_client.models.generate_content.side_effect = [
+        Exception("First Timeout"),
+        Exception("Second Fatal Error")
+    ]
+    mock_client_class.return_value = mock_client
+    
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
+        with pytest.raises(Exception, match="Second Fatal Error"):
+            run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
+            
+        mock_sleep.assert_called_once_with(2)
+        
+        # 驗證 sys.stderr 輸出正確的 [ERROR]
+        captured = capsys.readouterr()
+        assert "[Warning] Gemini API Failed on first attempt: Exception - First Timeout" in captured.err
+        assert "[ERROR] Gemini API Failed: Exception - Second Fatal Error" in captured.err
+
+
+def test_ai_analyzer_missing_api_key_throws_value_error(valid_features, temp_report_file, capsys):
+    """情境 4：當 GEMINI_API_KEY 缺失時，立即拋出 ValueError("GEMINI_API_KEY 未設定") 並向 sys.stderr 輸出錯誤"""
     with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
-        res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
-        assert res["date"] == "2026-08-14"
-        assert res["close"] == 530.0
-        assert res["llm_fallback"] is True
-        
-        # 驗證 sys.stderr 輸出警告
-        captured = capsys.readouterr()
-        assert "[Warning] GEMINI_API_KEY 未設定或為空字串" in captured.err
+        with pytest.raises(ValueError, match="GEMINI_API_KEY 未設定"):
+            run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
+            
+        captured = sys.stderr.getvalue() if hasattr(sys.stderr, "getvalue") else capsys.readouterr().err
+        assert "[ERROR] GEMINI_API_KEY 未設定" in captured

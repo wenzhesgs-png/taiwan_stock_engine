@@ -1,12 +1,9 @@
 import os
 import sys
 import json
+import time
 from google import genai
 from google.genai import types
-
-# 🔑 讀取環境變數中的 GEMINI_API_KEY
-API_KEY = os.environ.get("GEMINI_API_KEY", "")
-client = genai.Client(api_key=API_KEY if API_KEY else "dummy_key_for_init", http_options={'timeout': 10.0})
 
 def run_ai_analysis(
     latest_features: dict,
@@ -16,7 +13,8 @@ def run_ai_analysis(
     執行 AI qualitative 戰術 analysis (TICKET-FIX-AI-MEM)
     - 記憶體直接注入：接收已計算好的特徵字典，無硬碟路徑相依。
     - 嚴格的 Fail-Fast 資料驗證門禁。
-    - 支援 10s Timeout 與 Fallback 降級保護。
+    - 支援 30s Timeout 與 1 次自動重試（間隔 2 秒）。
+    - 任何認證、網路與連線異常時，直接 Fail-Fast 拋出例外，杜絕靜默降級。
     """
     # 1. Fail-Fast 阻斷門禁
     if not latest_features:
@@ -52,7 +50,7 @@ def run_ai_analysis(
     macd_part = macd_summary.split('(')[1].split(')')[0] if '(' in str(macd_summary) else str(macd_summary)
     tech_summary = f"KD: {kd_part.strip()} / MACD: {macd_part.strip()}"
 
-    # 3. 準備保底降級回覆 (Fallback Response)
+    # 3. 準備保底降級回覆 (Fallback Response, 僅用於 JSON 解析失敗等 API 呼叫成功但內容異常場景)
     fallback_res = {
         "date": str(date).strip(),
         "close": close_val,
@@ -63,23 +61,22 @@ def run_ai_analysis(
         "entry_plan": f"回測至 {round(close_val * 0.97, 1)} (-3.0%) 考慮進場",
         "exit_plan": f"達 {round(close_val * 1.05, 1)} (+5.0%) 停利 / 跌破 {round(close_val * 0.95, 1)} (-5.0%) 嚴格停損",
         "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
-        "wang_mou_analysis": "API 連線異常，啟動防禦性降級保底，暫時維持觀望避開震盪。",
+        "wang_mou_analysis": "API 回傳格式異常，啟用防禦性降級，暫時維持觀望避開震盪。",
         "llm_fallback": True
     }
 
-    # 4. 檢查 API Key 缺失與延遲實例化 Client (Lazy Initialization)
+    # 4. 檢查 API Key 缺失 (Fail-Fast: 立即拋出 ValueError 阻斷執行)
     current_key = os.environ.get("GEMINI_API_KEY", "")
     if not current_key or current_key.strip() == "":
-        print("⚠️ [Warning] GEMINI_API_KEY 未設定或為空字串，將安全啟用技術面保底戰報。", file=sys.stderr)
-        _write_report_file(fallback_res, report_path)
-        return fallback_res
+        print("[ERROR] GEMINI_API_KEY 未設定", file=sys.stderr)
+        raise ValueError("GEMINI_API_KEY 未設定")
 
+    # Lazy Init of genai.Client (Timeout 30.0s)
     try:
-        client = genai.Client(api_key=current_key, http_options={'timeout': 10.0})
+        client = genai.Client(api_key=current_key, http_options={'timeout': 30.0})
     except Exception as e:
         print(f"[ERROR] Failed to initialize Gemini Client: {type(e).__name__} - {e}", file=sys.stderr)
-        _write_report_file(fallback_res, report_path)
-        return fallback_res
+        raise e
 
     # 5. 構建軍師王謀定性分析 Prompt
     system_instruction = (
@@ -114,19 +111,31 @@ def run_ai_analysis(
     }}
     """
 
-    # 6. 10 秒 Timeout 與 API 容錯
+    # 6. API 呼叫 1 次重試機制（30 秒 Timeout，重試間隔 2 秒）
+    response = None
+    for attempt in range(1, 3):
+        try:
+            response = client.models.generate_content(
+                model='gemini-3.7-flash',
+                contents=user_prompt.strip(),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.7,
+                ),
+            )
+            break
+        except Exception as e:
+            if attempt == 1:
+                print(f"⚠️ [Warning] Gemini API Failed on first attempt: {type(e).__name__} - {e}. Retrying in 2 seconds...", file=sys.stderr)
+                time.sleep(2)
+            else:
+                # 第二次依然失敗，直接拋出例外
+                print(f"[ERROR] Gemini API Failed: {type(e).__name__} - {e}", file=sys.stderr)
+                raise e
+
+    # 7. 解析並修剪 JSON 數據
     try:
-        response = client.models.generate_content(
-            model='gemini-3.7-flash',
-            contents=user_prompt.strip(),
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
-            ),
-        )
-        
         text = response.text.strip()
-        # 修剪 Markdown 標記
         if text.startswith("```"):
             lines = text.split("\n")
             if lines[0].startswith("```"):
@@ -136,35 +145,34 @@ def run_ai_analysis(
             text = "\n".join(lines).strip()
             
         data = json.loads(text)
-        
-        # 7. JSON Schema 欄位缺失補防
-        final_res = {
-            "date": str(data.get("date", date)).strip(),
-            "close": close_val,
-            "technical_summary": tech_summary,
-            "win_rate": int(data.get("win_rate", 50)),
-            "action": str(data.get("action", "觀望")).strip(),
-            "suggested_position": float(data.get("suggested_position", 0.0)),
-            "entry_plan": str(data.get("entry_plan", fallback_res["entry_plan"])).strip(),
-            "exit_plan": str(data.get("exit_plan", fallback_res["exit_plan"])).strip(),
-            "gap_defense_note": str(data.get("gap_defense_note", fallback_res["gap_defense_note"])).strip(),
-            "wang_mou_analysis": str(data.get("wang_mou_analysis", "分析未明。")).strip(),
-            "llm_fallback": False
-        }
-        
-        # 限制字數與大小範圍
-        if len(final_res["wang_mou_analysis"]) > 200:
-            final_res["wang_mou_analysis"] = final_res["wang_mou_analysis"][:197] + "..."
-        final_res["suggested_position"] = max(0.0, min(1.0, final_res["suggested_position"]))
-        final_res["win_rate"] = max(0, min(100, final_res["win_rate"]))
-        
-        _write_report_file(final_res, report_path)
-        return final_res
-
     except Exception as e:
-        print(f"[ERROR] Gemini API Failed: {type(e).__name__} - {e}", file=sys.stderr)
+        print(f"⚠️ [Warning] JSON 解析失敗，啟用安全降級保底。原因: {e}", file=sys.stderr)
         _write_report_file(fallback_res, report_path)
         return fallback_res
+
+    # 8. JSON Schema 欄位缺失自動補防
+    final_res = {
+        "date": str(data.get("date", date)).strip(),
+        "close": close_val,
+        "technical_summary": tech_summary,
+        "win_rate": int(data.get("win_rate", 50)),
+        "action": str(data.get("action", "觀望")).strip(),
+        "suggested_position": float(data.get("suggested_position", 0.0)),
+        "entry_plan": str(data.get("entry_plan", fallback_res["entry_plan"])).strip(),
+        "exit_plan": str(data.get("exit_plan", fallback_res["exit_plan"])).strip(),
+        "gap_defense_note": str(data.get("gap_defense_note", fallback_res["gap_defense_note"])).strip(),
+        "wang_mou_analysis": str(data.get("wang_mou_analysis", "分析未明。")).strip(),
+        "llm_fallback": False
+    }
+    
+    # 限制字數與大小範圍
+    if len(final_res["wang_mou_analysis"]) > 200:
+        final_res["wang_mou_analysis"] = final_res["wang_mou_analysis"][:197] + "..."
+    final_res["suggested_position"] = max(0.0, min(1.0, final_res["suggested_position"]))
+    final_res["win_rate"] = max(0, min(100, final_res["win_rate"]))
+    
+    _write_report_file(final_res, report_path)
+    return final_res
 
 def _write_report_file(res: dict, report_path: str):
     try:
