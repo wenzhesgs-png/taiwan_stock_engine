@@ -71,9 +71,9 @@ def run_ai_analysis(
         print("[ERROR] GEMINI_API_KEY 未設定", file=sys.stderr)
         raise ValueError("GEMINI_API_KEY 未設定")
 
-    # Lazy Init of genai.Client (Timeout 30.0s)
+    # Lazy Init of genai.Client (Timeout 60.0s / 60000ms via types.HttpOptions)
     try:
-        client = genai.Client(api_key=current_key, http_options={'timeout': 30.0})
+        client = genai.Client(api_key=current_key, http_options=types.HttpOptions(timeout=60000))
     except Exception as e:
         print(f"[ERROR] Failed to initialize Gemini Client: {type(e).__name__} - {e}", file=sys.stderr)
         raise e
