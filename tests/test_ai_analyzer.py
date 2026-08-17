@@ -69,7 +69,7 @@ def test_ai_analyzer_fail_fast_missing_macd(valid_features):
 
 @patch("src.ai_analyzer.genai.Client")
 def test_ai_analyzer_success(mock_client_class, valid_features, temp_report_file):
-    """情境 1：API 首次調用成功，返回合規之輸出"""
+    """情境 1：首選模型 (gemini-3.7-flash) 調用成功，返回合規之輸出"""
     mock_response_text = """
     {
       "date": "2026-08-17",
@@ -100,12 +100,17 @@ def test_ai_analyzer_success(mock_client_class, valid_features, temp_report_file
         assert "王謀定性建議" in res["wang_mou_analysis"]
         assert res["llm_fallback"] is False
         assert res["technical_summary"] == "KD: 低檔鈍化 / 潛在黃金交叉 / MACD: 綠柱縮腳"
+        
+        # 驗證首次調用時傳入了 gemini-3.7-flash
+        mock_client.models.generate_content.assert_called_once()
+        _, kwargs = mock_client.models.generate_content.call_args
+        assert kwargs.get("model") == "gemini-3.7-flash"
 
 
 @patch("src.ai_analyzer.genai.Client")
 @patch("time.sleep")
-def test_ai_analyzer_retry_success(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
-    """情境 2：首次 API 調用逾時，第 2 次重試成功"""
+def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
+    """情境 2：首選模型 (gemini-3.7-flash) 調用失敗，自動無縫降級切換至備援模型 (gemini-3.6-flash) 且成功"""
     mock_response_text = """
     {
       "date": "2026-08-17",
@@ -119,9 +124,9 @@ def test_ai_analyzer_retry_success(mock_sleep, mock_client_class, valid_features
     }
     """
     mock_client = MagicMock()
-    # 第一回拋出逾時 Exception，第二回成功回傳
+    # 第一回拋出 503 UNAVAILABLE 錯誤，第二回成功回傳
     mock_client.models.generate_content.side_effect = [
-        Exception("ReadTimeout"),
+        Exception("503 UNAVAILABLE"),
         MagicMock(text=mock_response_text)
     ]
     mock_client_class.return_value = mock_client
@@ -134,36 +139,45 @@ def test_ai_analyzer_retry_success(mock_sleep, mock_client_class, valid_features
         assert res["win_rate"] == 65
         assert res["llm_fallback"] is False
         
-        # 驗證 time.sleep(2) 被調用了一次
+        # 驗證呼叫了 2 次 models.generate_content
+        assert mock_client.models.generate_content.call_count == 2
+        
+        # 驗證模型依序為 gemini-3.7-flash 與 gemini-3.6-flash
+        calls = mock_client.models.generate_content.call_args_list
+        assert calls[0][1].get("model") == "gemini-3.7-flash"
+        assert calls[1][1].get("model") == "gemini-3.6-flash"
+        
+        # 驗證 time.sleep(2) 觸發
         mock_sleep.assert_called_once_with(2)
         
-        # 驗證 sys.stderr 輸出重試警告
+        # 驗證 sys.stderr 輸出切換警告日誌
         captured = capsys.readouterr()
-        assert "[Warning] Gemini API Failed on first attempt: Exception - ReadTimeout" in captured.err
+        assert "[Warning] Primary model (gemini-3.7-flash) failed: Exception - 503" in captured.err
 
 
 @patch("src.ai_analyzer.genai.Client")
 @patch("time.sleep")
-def test_ai_analyzer_retry_fail_throws_exception(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
-    """情境 3：第 2 次重試依然失敗，Fail-Fast 直接拋出例外中斷且向 sys.stderr 輸出 [ERROR]"""
+def test_ai_analyzer_cascade_fail_throws_exception(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
+    """情境 3：主備模型皆失敗，Fail-Fast 直接拋出例外中斷且向 sys.stderr 輸出具體 [ERROR] 與 Traceback"""
     mock_client = MagicMock()
     # 兩次皆拋出錯誤
     mock_client.models.generate_content.side_effect = [
-        Exception("First Timeout"),
-        Exception("Second Fatal Error")
+        Exception("Primary Timeout"),
+        Exception("Fallback Overloaded 503")
     ]
     mock_client_class.return_value = mock_client
     
     with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
-        with pytest.raises(Exception, match="Second Fatal Error"):
+        with pytest.raises(Exception, match="Fallback Overloaded 503"):
             run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
             
+        assert mock_client.models.generate_content.call_count == 2
         mock_sleep.assert_called_once_with(2)
         
-        # 驗證 sys.stderr 輸出正確的 [ERROR]
+        # 驗證 sys.stderr 輸出正確的切換警告、[ERROR] 與 Traceback
         captured = capsys.readouterr()
-        assert "[Warning] Gemini API Failed on first attempt: Exception - First Timeout" in captured.err
-        assert "[ERROR] Gemini API Failed: Exception - Second Fatal Error" in captured.err
+        assert "[Warning] Primary model (gemini-3.7-flash) failed: Exception - Primary Timeout" in captured.err
+        assert "[ERROR] Gemini API Failed on both primary and fallback models: Exception - Fallback Overloaded 503" in captured.err
 
 
 def test_ai_analyzer_missing_api_key_throws_value_error(valid_features, temp_report_file, capsys):

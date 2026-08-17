@@ -111,27 +111,38 @@ def run_ai_analysis(
     }}
     """
 
-    # 6. API 呼叫 1 次重試機制（30 秒 Timeout，重試間隔 2 秒）
+    # 6. 主備雙模型動態降級機制 (Primary-to-Fallback Cascade)
+    # 首選模型: gemini-3.7-flash
+    # 備援模型: gemini-3.6-flash
     response = None
-    for attempt in range(1, 3):
+    try:
+        response = client.models.generate_content(
+            model='gemini-3.7-flash',
+            contents=user_prompt.strip(),
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.7,
+            ),
+        )
+    except Exception as e1:
+        print(f"⚠️ [Warning] Primary model (gemini-3.7-flash) failed: {type(e1).__name__} - {e1}. "
+              "Switching to fallback model (gemini-3.6-flash)...", file=sys.stderr)
+        time.sleep(2)
         try:
             response = client.models.generate_content(
-                model='gemini-3.7-flash',
+                model='gemini-3.6-flash',
                 contents=user_prompt.strip(),
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     temperature=0.7,
                 ),
             )
-            break
-        except Exception as e:
-            if attempt == 1:
-                print(f"⚠️ [Warning] Gemini API Failed on first attempt: {type(e).__name__} - {e}. Retrying in 2 seconds...", file=sys.stderr)
-                time.sleep(2)
-            else:
-                # 第二次依然失敗，直接拋出例外
-                print(f"[ERROR] Gemini API Failed: {type(e).__name__} - {e}", file=sys.stderr)
-                raise e
+        except Exception as e2:
+            # 主備模型皆失敗，Fail-Fast 阻斷拋出例外並輸出具體 Traceback
+            print(f"[ERROR] Gemini API Failed on both primary and fallback models: {type(e2).__name__} - {e2}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            raise e2
 
     # 7. 解析並修剪 JSON 數據
     try:
