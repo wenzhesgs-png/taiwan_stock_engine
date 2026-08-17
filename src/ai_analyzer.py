@@ -67,10 +67,17 @@ def run_ai_analysis(
         "llm_fallback": True
     }
 
-    # 4. 檢查 API Key 缺失
-    current_key = API_KEY or os.environ.get("GEMINI_API_KEY", "")
-    if not current_key or current_key == "":
+    # 4. 檢查 API Key 缺失與延遲實例化 Client (Lazy Initialization)
+    current_key = os.environ.get("GEMINI_API_KEY", "")
+    if not current_key or current_key.strip() == "":
         print("⚠️ [Warning] GEMINI_API_KEY 未設定或為空字串，將安全啟用技術面保底戰報。", file=sys.stderr)
+        _write_report_file(fallback_res, report_path)
+        return fallback_res
+
+    try:
+        client = genai.Client(api_key=current_key, http_options={'timeout': 10.0})
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize Gemini Client: {type(e).__name__} - {e}", file=sys.stderr)
         _write_report_file(fallback_res, report_path)
         return fallback_res
 

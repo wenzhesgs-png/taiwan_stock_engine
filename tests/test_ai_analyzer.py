@@ -66,8 +66,8 @@ def test_ai_analyzer_fail_fast_missing_macd(valid_features):
         run_ai_analysis(latest_features=features)
 
 
-@patch("google.genai.Client")
-def test_ai_analyzer_success(mock_genai_client_class, valid_features, temp_report_file):
+@patch("src.ai_analyzer.genai.Client")
+def test_ai_analyzer_success(mock_client_class, valid_features, temp_report_file):
     """情境 1：API 調用成功，返回合規之輸出"""
     mock_response_text = """
     {
@@ -83,10 +83,9 @@ def test_ai_analyzer_success(mock_genai_client_class, valid_features, temp_repor
     """
     mock_client = MagicMock()
     mock_client.models.generate_content.return_value = MagicMock(text=mock_response_text)
+    mock_client_class.return_value = mock_client
     
-    with patch("src.ai_analyzer.client", mock_client), \
-         patch("src.ai_analyzer.API_KEY", "valid_key"):
-        
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
         res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
         
         assert res["date"] == "2026-08-14"
@@ -103,15 +102,14 @@ def test_ai_analyzer_success(mock_genai_client_class, valid_features, temp_repor
         assert res["technical_summary"] == "KD: 低檔鈍化 / 潛在黃金交叉 / MACD: 綠柱縮腳"
 
 
-@patch("google.genai.Client")
-def test_ai_analyzer_api_error_fallback(mock_genai_client_class, valid_features, temp_report_file, capsys):
+@patch("src.ai_analyzer.genai.Client")
+def test_ai_analyzer_api_error_fallback(mock_client_class, valid_features, temp_report_file, capsys):
     """情境 2：API 逾時或報錯時，測試 Fallback 且向 sys.stderr 輸出結構化錯誤日誌"""
     mock_client = MagicMock()
     mock_client.models.generate_content.side_effect = Exception("API Connection Timeout")
+    mock_client_class.return_value = mock_client
     
-    with patch("src.ai_analyzer.client", mock_client), \
-         patch("src.ai_analyzer.API_KEY", "valid_key"):
-        
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
         res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
         
         assert res["date"] == "2026-08-14"  # 真實日期
@@ -132,7 +130,7 @@ def test_ai_analyzer_api_error_fallback(mock_genai_client_class, valid_features,
 
 def test_ai_analyzer_missing_api_key_fallback(valid_features, temp_report_file, capsys):
     """測試當 GEMINI_API_KEY 缺失時，安全回傳技術面保底戰報且向 sys.stderr 輸出警告"""
-    with patch("src.ai_analyzer.API_KEY", ""):
+    with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
         res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
         assert res["date"] == "2026-08-14"
         assert res["close"] == 530.0
