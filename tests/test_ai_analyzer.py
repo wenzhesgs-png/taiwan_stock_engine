@@ -104,8 +104,8 @@ def test_ai_analyzer_success(mock_genai_client_class, valid_features, temp_repor
 
 
 @patch("google.genai.Client")
-def test_ai_analyzer_api_error_fallback(mock_genai_client_class, valid_features, temp_report_file):
-    """情境 2：API 逾時或報錯時，測試 Fallback 能保留傳入的真實收盤價與真實日期"""
+def test_ai_analyzer_api_error_fallback(mock_genai_client_class, valid_features, temp_report_file, capsys):
+    """情境 2：API 逾時或報錯時，測試 Fallback 且向 sys.stderr 輸出結構化錯誤日誌"""
     mock_client = MagicMock()
     mock_client.models.generate_content.side_effect = Exception("API Connection Timeout")
     
@@ -124,3 +124,20 @@ def test_ai_analyzer_api_error_fallback(mock_genai_client_class, valid_features,
         assert "556.5" in res["exit_plan"]   # 基於真實收盤價 530 * 1.05 計算
         assert "防禦性降級" in res["wang_mou_analysis"]
         assert res["llm_fallback"] is True
+        
+        # 驗證 sys.stderr 輸出
+        captured = capsys.readouterr()
+        assert "[ERROR] Gemini API Failed: Exception - API Connection Timeout" in captured.err
+
+
+def test_ai_analyzer_missing_api_key_fallback(valid_features, temp_report_file, capsys):
+    """測試當 GEMINI_API_KEY 缺失時，安全回傳技術面保底戰報且向 sys.stderr 輸出警告"""
+    with patch("src.ai_analyzer.API_KEY", ""):
+        res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
+        assert res["date"] == "2026-08-14"
+        assert res["close"] == 530.0
+        assert res["llm_fallback"] is True
+        
+        # 驗證 sys.stderr 輸出警告
+        captured = capsys.readouterr()
+        assert "[Warning] GEMINI_API_KEY 未設定或為空字串" in captured.err

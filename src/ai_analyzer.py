@@ -1,6 +1,7 @@
 import os
+import sys
 import json
-import google.genai as genai
+from google import genai
 from google.genai import types
 
 # 🔑 讀取環境變數中的 GEMINI_API_KEY
@@ -69,6 +70,7 @@ def run_ai_analysis(
     # 4. 檢查 API Key 缺失
     current_key = API_KEY or os.environ.get("GEMINI_API_KEY", "")
     if not current_key or current_key == "":
+        print("⚠️ [Warning] GEMINI_API_KEY 未設定或為空字串，將安全啟用技術面保底戰報。", file=sys.stderr)
         _write_report_file(fallback_res, report_path)
         return fallback_res
 
@@ -108,7 +110,7 @@ def run_ai_analysis(
     # 6. 10 秒 Timeout 與 API 容錯
     try:
         response = client.models.generate_content(
-            model='gemini-3.6-flash',
+            model='gemini-3.7-flash',
             contents=user_prompt.strip(),
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -153,7 +155,7 @@ def run_ai_analysis(
         return final_res
 
     except Exception as e:
-        print(f"⚠️ [ai_analyzer] API 異常或解析失敗 ({e})，啟動防禦性降級。")
+        print(f"[ERROR] Gemini API Failed: {type(e).__name__} - {e}", file=sys.stderr)
         _write_report_file(fallback_res, report_path)
         return fallback_res
 
