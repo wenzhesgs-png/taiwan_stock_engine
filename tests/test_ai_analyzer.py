@@ -3,11 +3,55 @@ import sys
 import json
 import pytest
 from unittest.mock import patch, MagicMock
-from src.ai_analyzer import run_ai_analysis
+from src.ai_analyzer import run_ai_analysis, _parse_trade_journals
 
 @pytest.fixture
 def temp_report_file(tmp_path):
     return str(tmp_path / "llm_agent_report.json")
+
+@pytest.fixture
+def mock_trade_journals(tmp_path):
+    """建立臨時的 trade_journals.json"""
+    journal_data = {
+        "journals": {
+            "#2_HUMAN_GOLD_STANDARD": [
+                {
+                    "wave": "Wave 1",
+                    "buy_date": "2026-01-02",
+                    "sell_date": "2026-01-13",
+                    "buy_price": 500.0,
+                    "sell_price": 600.0,
+                    "shares": 100,
+                    "realized_pnl": 10000.0,
+                    "pnl_pct": 20.0
+                }
+            ],
+            "A8_TOP_DEFENSE_MODERATE": [
+                {
+                    "agent_id": "A8_TOP_DEFENSE_MODERATE",
+                    "date": "2026-01-15",
+                    "action": "BUY",
+                    "price": 500.0,
+                    "shares": 200,
+                    "amount": 100000.0,
+                    "reason": "HIGH_CONFIDENCE_BYPASS"
+                },
+                {
+                    "agent_id": "A8_TOP_DEFENSE_MODERATE",
+                    "date": "2026-02-02",
+                    "action": "SELL",
+                    "price": 460.0,
+                    "shares": 200,
+                    "amount": 92000.0,
+                    "reason": "HARD_STOP_LOSS_8PCT"
+                }
+            ]
+        }
+    }
+    journal_file = tmp_path / "trade_journals.json"
+    with open(journal_file, "w", encoding="utf-8") as f:
+        json.dump(journal_data, f, indent=2, ensure_ascii=False)
+    return str(journal_file)
 
 @pytest.fixture
 def valid_features():
@@ -67,9 +111,23 @@ def test_ai_analyzer_fail_fast_missing_macd(valid_features):
         run_ai_analysis(latest_features=features)
 
 
+def test_parse_trade_journals_success(mock_trade_journals):
+    """測試解析交易日誌成功情境"""
+    res = _parse_trade_journals(mock_trade_journals)
+    assert "完成 1 個波段交易" in res["human_summary"]
+    assert "完成 1 次往返交易" in res["a8_summary"]
+    assert "HARD_STOP_LOSS_8PCT" in res["a8_summary"]
+
+def test_parse_trade_journals_missing_file():
+    """測試當交易日誌不存在時，應能優雅保底且向 sys.stderr 輸出日誌"""
+    res = _parse_trade_journals("non_existent_path.json")
+    assert "歷史波段：無數據" in res["human_summary"]
+    assert "歷史波段：無數據" in res["a8_summary"]
+
+
 @patch("src.ai_analyzer.genai.Client")
-def test_ai_analyzer_success(mock_client_class, valid_features, temp_report_file):
-    """情境 1：首選模型 (gemini-3.7-flash) 調用成功，返回合規之輸出"""
+def test_ai_analyzer_success(mock_client_class, mock_trade_journals, valid_features, temp_report_file):
+    """情境 1：API 首次調用成功，返回合規之輸出（且 trade_journals 存在）"""
     mock_response_text = """
     {
       "date": "2026-08-17",
@@ -103,13 +161,18 @@ def test_ai_analyzer_success(mock_client_class, valid_features, temp_report_file
         
         # 驗證首次調用時傳入了 gemini-3.7-flash
         mock_client.models.generate_content.assert_called_once()
-        _, kwargs = mock_client.models.generate_content.call_args
+        args, kwargs = mock_client.models.generate_content.call_args
         assert kwargs.get("model") == "gemini-3.7-flash"
+        
+        # 驗證 Prompt 中注入了歷史戰役參考
+        user_prompt = args[0] if len(args) > 0 else kwargs.get("contents")
+        assert "人類黃金基準" in user_prompt
+        assert "穩健冠軍交易員" in user_prompt
 
 
 @patch("src.ai_analyzer.genai.Client")
 @patch("time.sleep")
-def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
+def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, mock_trade_journals, valid_features, temp_report_file, capsys):
     """情境 2：首選模型 (gemini-3.7-flash) 調用失敗，自動無縫降級切換至備援模型 (gemini-3.6-flash) 且成功"""
     mock_response_text = """
     {
@@ -124,7 +187,6 @@ def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, valid_featur
     }
     """
     mock_client = MagicMock()
-    # 第一回拋出 503 UNAVAILABLE 錯誤，第二回成功回傳
     mock_client.models.generate_content.side_effect = [
         Exception("503 UNAVAILABLE"),
         MagicMock(text=mock_response_text)
@@ -157,10 +219,9 @@ def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, valid_featur
 
 @patch("src.ai_analyzer.genai.Client")
 @patch("time.sleep")
-def test_ai_analyzer_cascade_fail_throws_exception(mock_sleep, mock_client_class, valid_features, temp_report_file, capsys):
+def test_ai_analyzer_cascade_fail_throws_exception(mock_sleep, mock_client_class, mock_trade_journals, valid_features, temp_report_file, capsys):
     """情境 3：主備模型皆失敗，Fail-Fast 直接拋出例外中斷且向 sys.stderr 輸出具體 [ERROR] 與 Traceback"""
     mock_client = MagicMock()
-    # 兩次皆拋出錯誤
     mock_client.models.generate_content.side_effect = [
         Exception("Primary Timeout"),
         Exception("Fallback Overloaded 503")

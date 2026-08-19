@@ -5,6 +5,70 @@ import time
 from google import genai
 from google.genai import types
 
+def _parse_trade_journals(journal_path: str) -> dict:
+    """
+    解析 data/trade_journals.json 中的 A8_TOP_DEFENSE_MODERATE 與 #2_HUMAN_GOLD_STANDARD 資訊
+    """
+    default_res = {
+        "human_summary": "歷史波段：無數據；目前無即時持倉。",
+        "a8_summary": "歷史波段：無數據；即時持倉：無；出場教訓：無"
+    }
+    if not os.path.exists(journal_path):
+        return default_res
+    try:
+        with open(journal_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        journals = data.get("journals", {})
+        
+        # 1. 解析 #2_HUMAN_GOLD_STANDARD (人類黃金基準)
+        human_list = journals.get("#2_HUMAN_GOLD_STANDARD", [])
+        if human_list:
+            total_waves = len(human_list)
+            total_pnl = sum(float(w.get("realized_pnl", 0.0)) for w in human_list)
+            avg_pnl_pct = sum(float(w.get("pnl_pct", 0.0)) for w in human_list) / total_waves if total_waves > 0 else 0.0
+            human_summary = f"歷史波段：已完成 {total_waves} 個波段交易，累計實現損益 ${total_pnl:.2f} 元，平均波段報酬率 {avg_pnl_pct:.2f}%。目前無即時持倉。"
+        else:
+            human_summary = "歷史波段：無資料；目前無即時持倉。"
+            
+        # 2. 解析 A8_TOP_DEFENSE_MODERATE (穩健冠軍)
+        a8_list = journals.get("A8_TOP_DEFENSE_MODERATE", [])
+        if a8_list:
+            holding = "無"
+            exit_lessons = []
+            completed_trades = 0
+            total_realized_pnl = 0.0
+            
+            last_buy = None
+            for tx in a8_list:
+                action = tx.get("action")
+                date = tx.get("date")
+                price = tx.get("price")
+                reason = tx.get("reason")
+                if action == "BUY":
+                    last_buy = tx
+                    holding = f"持倉中 (買入日期: {date}, 價格: {price}, 股數: {tx.get('shares')}, 買入原因: {reason})"
+                elif action == "SELL":
+                    completed_trades += 1
+                    exit_lessons.append(f"{date} 因 {reason} 平倉離場 (價格: {price})" if reason else f"{date} 平倉離場")
+                    if last_buy:
+                        pnl = float(tx.get("amount", 0.0)) - float(last_buy.get("amount", 0.0))
+                        total_realized_pnl += pnl
+                    holding = "無 (已平倉)"
+                    last_buy = None
+            
+            lessons_str = "、".join(exit_lessons[-3:]) if exit_lessons else "無"
+            a8_summary = f"歷史波段：完成 {completed_trades} 次往返交易，累計實現損益 ${total_realized_pnl:.2f} 元。即時持倉：{holding}。出場教訓：{lessons_str}。"
+        else:
+            a8_summary = "歷史波段：無資料；即時持倉：無；出場教訓：無。"
+            
+        return {
+            "human_summary": human_summary,
+            "a8_summary": a8_summary
+        }
+    except Exception as e:
+        print(f"⚠️ [Warning] Parsing trade journals failed: {e}. Falling back to default empty strings.", file=sys.stderr)
+        return default_res
+
 def run_ai_analysis(
     latest_features: dict,
     report_path: str = "data/llm_agent_report.json"
@@ -85,12 +149,22 @@ def run_ai_analysis(
         "你必須嚴格遵守輸出 JSON 規格，不包含任何 Markdown 標記、JSON 標籤、或任何前後言雜訊。"
     )
     
+    # 讀取並解析交易日誌
+    journal_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(report_path)), "trade_journals.json"))
+    journal_data = _parse_trade_journals(journal_path)
+    human_summary = journal_data["human_summary"]
+    a8_summary = journal_data["a8_summary"]
+
     user_prompt = f"""
     主帥提供最新盤後情報：
-    • 標的名稱/代碼：瑞昱 2379.TW
+    • 標建立或代碼：瑞昱 2379.TW
     • 數據截止日期：{date}
     • 今日收盤價：{close_val} 元
     • 技術指標狀態：KD - {kd_summary} / MACD - {macd_summary}
+    
+    📊 歷史戰役與戰友持倉參考：
+    • 人類黃金基準 (#2_HUMAN_GOLD_STANDARD)：{human_summary}
+    • 穩健冠軍交易員 (A8_TOP_DEFENSE_MODERATE)：{a8_summary}
     
     請結合上述數據制定明天的事前交易觸發計畫：
     1. 評估「預估勝率 (win_rate, % 為 0 至 100 之間整數)」與「建議倉位 (suggested_position, 0.0 到 1.0 之間浮點數)」。
