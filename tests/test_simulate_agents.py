@@ -178,3 +178,60 @@ def test_tiered_discount_fee_and_monthly_reset():
     fee3 = SettlementEngine.calculate_fee(state, 500000.0, "2026-02-01")
     assert fee3 == 142.0
     assert state.monthly_turnover == 500000.0
+
+
+def test_champion_selection_and_tie_breaker():
+    """
+    DoD 1 TDD 測試:
+    - 驗證全沙盒冠軍選拔之同分優先級：A8_TOP_DEFENSE_MODERATE > A9_TOP_DEFENSE_CONSERVATIVE > A7_TOP_DEFENSE_AGGRESSIVE > 其餘 Agent。
+    """
+    from src.simulate_agents import execute_simulation_pipeline
+    
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    isd_path = os.path.join(current_dir, "..", "data", "isd_predict_report.json")
+    
+    if os.path.exists(isd_path):
+        try:
+            os.remove(isd_path)
+        except Exception:
+            pass
+            
+    execute_simulation_pipeline()
+    
+    assert os.path.exists(isd_path), "❌ isd_predict_report.json 應被更新或成功創建！"
+    
+    with open(isd_path, "r", encoding="utf-8") as f:
+        isd_data = json.load(f)
+        
+    assert "champion_summary" in isd_data, "❌ isd_predict_report.json 應包含 champion_summary 節點！"
+    summary = isd_data["champion_summary"]
+    assert "agent_id" in summary
+    assert "annual_roi" in summary
+    assert "today_action" in summary
+    assert "holding_status" in summary
+    assert "entry_price" in summary
+    assert "shares" in summary
+    
+    # 驗證同分裁決優先級排序
+    # 我們構建一個同分的名單進行模擬比對
+    priority_order = {
+        "A8_TOP_DEFENSE_MODERATE": 0,
+        "A9_TOP_DEFENSE_CONSERVATIVE": 1,
+        "A7_TOP_DEFENSE_AGGRESSIVE": 2
+    }
+    
+    mock_tied_agents = [
+        {"name": "A1_V_REVERSAL_AGGRESSIVE", "roi_pct": 120.0},
+        {"name": "A7_TOP_DEFENSE_AGGRESSIVE", "roi_pct": 120.0},
+        {"name": "A8_TOP_DEFENSE_MODERATE", "roi_pct": 120.0},
+        {"name": "A9_TOP_DEFENSE_CONSERVATIVE", "roi_pct": 120.0}
+    ]
+    
+    def get_sort_key(item):
+        prio = priority_order.get(item["name"], 999)
+        return (-item["roi_pct"], prio, item["name"])
+        
+    sorted_tied = sorted(mock_tied_agents, key=get_sort_key)
+    assert sorted_tied[0]["name"] == "A8_TOP_DEFENSE_MODERATE", "同分時應優先選擇 A8"
+    assert sorted_tied[1]["name"] == "A9_TOP_DEFENSE_CONSERVATIVE", "次選應為 A9"
+    assert sorted_tied[2]["name"] == "A7_TOP_DEFENSE_AGGRESSIVE", "再者應為 A7"

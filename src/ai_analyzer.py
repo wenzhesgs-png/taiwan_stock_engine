@@ -114,22 +114,49 @@ def run_ai_analysis(
     macd_part = macd_summary.split('(')[1].split(')')[0] if '(' in str(macd_summary) else str(macd_summary)
     tech_summary = f"KD: {kd_part.strip()} / MACD: {macd_part.strip()}"
 
-    # 3. 準備保底降級回覆 (Fallback Response, 僅用於 JSON 解析失敗等 API 呼叫成功但內容異常場景)
+    # 3. 讀取並解析交易日誌
+    journal_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(report_path)), "trade_journals.json"))
+    journal_data = _parse_trade_journals(journal_path)
+    human_summary = journal_data["human_summary"]
+    a8_summary = journal_data["a8_summary"]
+
+    # 4. 讀取 isd_predict_report.json 獲取動態選拔的冠軍資訊 (DoD 2)
+    champion_agent = "A8_TOP_DEFENSE_MODERATE"
+    action = "HOLD"
+    
+    isd_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(report_path)), "isd_predict_report.json"))
+    if os.path.exists(isd_path):
+        try:
+            with open(isd_path, "r", encoding="utf-8") as f:
+                isd_data = json.load(f)
+            summary = isd_data.get("champion_summary")
+            if summary:
+                champion_agent = summary.get("agent_id", "A8_TOP_DEFENSE_MODERATE")
+                action = summary.get("today_action", "HOLD")
+            else:
+                print("[Warning] champion_summary missing", file=sys.stderr)
+        except Exception as e:
+            print(f"[Warning] Parsing isd_predict_report.json failed: {e}. Falling back to default champion.", file=sys.stderr)
+    else:
+        print("[Warning] champion_summary missing", file=sys.stderr)
+
+    # 5. 準備保底降級回覆 (Fallback Response)
     fallback_res = {
         "date": str(date).strip(),
         "close": close_val,
         "technical_summary": tech_summary,
-        "win_rate": 50,
-        "action": "觀望",
-        "suggested_position": 0.0,
-        "entry_plan": f"回測至 {round(close_val * 0.97, 1)} (-3.0%) 考慮進場",
+        "champion_agent": champion_agent,
+        "action": action,
+        "suggested_position": 0.0 if action != "BUY" else 0.1,
+        "entry_plan": None if action != "BUY" else f"回測至 {round(close_val * 0.97, 1)} (-3.0%) 考慮進場",
         "exit_plan": f"達 {round(close_val * 1.05, 1)} (+5.0%) 停利 / 跌破 {round(close_val * 0.95, 1)} (-5.0%) 嚴格停損",
+        "defense_plan_empty_hand": "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號" if action != "BUY" else "不適用",
         "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
-        "wang_mou_analysis": "API 回傳格式異常，啟用防禦性降級，暫時維持觀望避開震盪。",
+        "wang_mou_analysis": "API 連線異常，啟用防禦性降級，暫時維持原有戰術守則。",
         "llm_fallback": True
     }
 
-    # 4. 檢查 API Key 缺失 (Fail-Fast: 立即拋出 ValueError 阻斷執行)
+    # 6. 檢查 API Key 缺失 (Fail-Fast: 立即拋出 ValueError 阻斷執行)
     current_key = os.environ.get("GEMINI_API_KEY", "")
     if not current_key or current_key.strip() == "":
         print("[ERROR] GEMINI_API_KEY 未設定", file=sys.stderr)
@@ -142,19 +169,31 @@ def run_ai_analysis(
         print(f"[ERROR] Failed to initialize Gemini Client: {type(e).__name__} - {e}", file=sys.stderr)
         raise e
 
-    # 5. 構建軍師王謀定性分析 Prompt
+    # 7. 構建軍師王謀定性分析 Prompt
     system_instruction = (
         "你名叫「王謀」，是股市最倚重的首席戰術軍師。\n"
         "請根據主帥提供的盤後價格與技術面指標，執行極富進攻性的「五層思考定性分析」，並制定明天的交易作戰計畫。\n"
         "你必須嚴格遵守輸出 JSON 規格，不包含任何 Markdown 標記、JSON 標籤、或任何前後言雜訊。"
     )
-    
-    # 讀取並解析交易日誌
-    journal_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(report_path)), "trade_journals.json"))
-    journal_data = _parse_trade_journals(journal_path)
-    human_summary = journal_data["human_summary"]
-    a8_summary = journal_data["a8_summary"]
 
+    # 依據今日狀態動態切換硬性約束，抑制非買點進場計畫生成 (DoD 2)
+    if action in ["HOLD", "WAIT", "EXIT"]:
+        hard_constraint = (
+            "\n🔴 【硬性約束門禁 (Hard Constraint)】：\n"
+            f"目前最新量化冠軍 Agent 判定今日訊號為 {action} (非買點日)。\n"
+            "1. 嚴禁在回覆中生成任何形式的進場價位、回測低接或試單買點！\n"
+            "2. 回傳 JSON 的 'entry_plan' 欄位必須強制設定為 null。\n"
+            "3. 必須在 'defense_plan_empty_hand' 欄位中提供空手者紀律：'波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號'。\n"
+        )
+    else:
+        hard_constraint = (
+            "\n🟢 【進場建倉提示】：\n"
+            f"目前今日訊號為 BUY (黃金買點日)。\n"
+            "1. 請在 'entry_plan' 欄位中生成黃金買點建倉計畫（必須包含具體價格如 $XXX 與相對今日收盤價的百分比變動，如 -X.X%）。\n"
+            "2. 建議倉位 'suggested_position' 應根據勝率進行大膽配置（大於 0.0 且最大為 1.0）。\n"
+            "3. 'defense_plan_empty_hand' 可設定為 '不適用'。\n"
+        )
+    
     user_prompt = f"""
     主帥提供最新盤後情報：
     • 標建立或代碼：瑞昱 2379.TW
@@ -165,29 +204,27 @@ def run_ai_analysis(
     📊 歷史戰役與戰友持倉參考：
     • 人類黃金基準 (#2_HUMAN_GOLD_STANDARD)：{human_summary}
     • 穩健冠軍交易員 (A8_TOP_DEFENSE_MODERATE)：{a8_summary}
+    {hard_constraint}
     
-    請結合上述數據制定明天的事前交易觸發計畫：
-    1. 評估「預估勝率 (win_rate, % 為 0 至 100 之間整數)」與「建議倉位 (suggested_position, 0.0 到 1.0 之間浮點數)」。
-    2. 提供具體進場計畫 (entry_plan) 與出場計畫 (exit_plan)，格式必須包含具體目標價格（如 $XXX）以及相對今日收盤價 {close_val} 元的百分比變動（如 -X.X% 或 +X.X%）。
-    3. 跳空防守 (gap_defense_note) 必須明確標註「若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價」之防守原則。
-    4. 輸出限制：字數王謀分析在 200 字以內。
+    請結合上述數據與約束，制定明天的事前交易計畫與定性診斷。
     
     必須嚴格以下列 JSON 格式直接回覆：
     {{
       "date": "{date}",
-      "win_rate": 65,
-      "action": "小資金試單 (搶V轉) / 觀望 / 進場",
-      "suggested_position": 0.1,
-      "entry_plan": "回測至 $XXX (-X.X%) 考慮進場 / 跌破 $XXX (-X.X%) 必買",
+      "close": {close_val},
+      "technical_summary": "{tech_summary}",
+      "champion_agent": "{champion_agent}",
+      "action": "{action}",
+      "suggested_position": 0.0,
+      "entry_plan": null,
       "exit_plan": "達 $XXX (+X.X%) 停利 / 跌破 $XXX (-X.X%) 嚴格停損",
+      "defense_plan_empty_hand": "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號",
       "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
       "wang_mou_analysis": "軍師王謀定性分析（200字以內）"
     }}
     """
 
-    # 6. 主備雙模型動態降級機制 (Primary-to-Fallback Cascade)
-    # 首選模型: gemini-3.7-flash
-    # 備援模型: gemini-3.6-flash
+    # 8. 主備雙模型動態降級機制 (Primary-to-Fallback Cascade)
     response = None
     try:
         response = client.models.generate_content(
@@ -212,13 +249,12 @@ def run_ai_analysis(
                 ),
             )
         except Exception as e2:
-            # 主備模型皆失敗，Fail-Fast 阻斷拋出例外並輸出具體 Traceback
             print(f"[ERROR] Gemini API Failed on both primary and fallback models: {type(e2).__name__} - {e2}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
             raise e2
 
-    # 7. 解析並修剪 JSON 數據
+    # 9. 解析並修剪 JSON 數據
     try:
         text = response.text.strip()
         if text.startswith("```"):
@@ -235,16 +271,29 @@ def run_ai_analysis(
         _write_report_file(fallback_res, report_path)
         return fallback_res
 
-    # 8. JSON Schema 欄位缺失自動補防
+    # 10. JSON Schema 欄位缺失與硬性安全校驗自動補防
+    final_action = str(data.get("action", action)).strip()
+    final_suggested_pos = float(data.get("suggested_position", 0.0))
+    final_entry_plan = data.get("entry_plan")
+    
+    # 硬性抑制非買點進場計畫生成 (DoD 2)
+    if final_action != "BUY":
+        final_suggested_pos = 0.0
+        final_entry_plan = None
+    else:
+        if final_entry_plan is None or str(final_entry_plan).strip() == "":
+            final_entry_plan = fallback_res["entry_plan"]
+
     final_res = {
         "date": str(data.get("date", date)).strip(),
         "close": close_val,
         "technical_summary": tech_summary,
-        "win_rate": int(data.get("win_rate", 50)),
-        "action": str(data.get("action", "觀望")).strip(),
-        "suggested_position": float(data.get("suggested_position", 0.0)),
-        "entry_plan": str(data.get("entry_plan", fallback_res["entry_plan"])).strip(),
+        "champion_agent": str(data.get("champion_agent", champion_agent)).strip(),
+        "action": final_action,
+        "suggested_position": final_suggested_pos,
+        "entry_plan": final_entry_plan,
         "exit_plan": str(data.get("exit_plan", fallback_res["exit_plan"])).strip(),
+        "defense_plan_empty_hand": str(data.get("defense_plan_empty_hand", fallback_res["defense_plan_empty_hand"])).strip(),
         "gap_defense_note": str(data.get("gap_defense_note", fallback_res["gap_defense_note"])).strip(),
         "wang_mou_analysis": str(data.get("wang_mou_analysis", "分析未明。")).strip(),
         "llm_fallback": False
@@ -254,7 +303,7 @@ def run_ai_analysis(
     if len(final_res["wang_mou_analysis"]) > 200:
         final_res["wang_mou_analysis"] = final_res["wang_mou_analysis"][:197] + "..."
     final_res["suggested_position"] = max(0.0, min(1.0, final_res["suggested_position"]))
-    final_res["win_rate"] = max(0, min(100, final_res["win_rate"]))
+    final_res["win_rate"] = max(0, min(100, int(data.get("win_rate", 50)))) # 保全 win_rate 相容舊代碼
     
     _write_report_file(final_res, report_path)
     return final_res

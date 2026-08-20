@@ -42,9 +42,10 @@ def send_telegram_notification(
     action = report_data.get("action", "觀望")
     win_rate = report_data.get("win_rate", 50)
     suggested_position = report_data.get("suggested_position", 0.0)
-    entry_plan = report_data.get("entry_plan", "未設定")
+    entry_plan = report_data.get("entry_plan")
     exit_plan = report_data.get("exit_plan", "未設定")
     gap_defense_note = report_data.get("gap_defense_note", "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價")
+    defense_plan_empty_hand = report_data.get("defense_plan_empty_hand", "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號")
     wang_mou_analysis = report_data.get("wang_mou_analysis", "無分析內容")
 
     # 建議倉位轉換為百分比
@@ -57,21 +58,53 @@ def send_telegram_notification(
     except Exception:
         suggested_position_pct = 0
 
-    # 格式化為高資訊密度 Markdown 排版 (去除 Debug 噪訊與括號變數)
+    # 動態組裝「軍師王謀戰術決策」區塊 (DoD 3)
+    if action == "BUY":
+        tactical_header = "🎯 黃金買點建倉計畫（含進場價與建議倉位）："
+        tactical_items = [
+            f"• 動作建議：{action}",
+            f"• 預估勝率：{win_rate}%",
+            f"• 建議倉位：{suggested_position_pct}%"
+        ]
+    else:
+        tactical_header = "🎯 軍師王謀戰術決策："
+        tactical_items = [
+            f"• 動作建議：{action}",
+            f"• 預估勝率：{win_rate}%",
+            f"• 建議倉位：{suggested_position_pct}%"
+        ]
+    tactical_decision_text = tactical_header + "\n" + "\n".join(tactical_items)
+
+    # 依狀態與進場條件動態構建「隔日事前觸發計畫」區塊的行項目，實現非買點日 100% 隱藏進場條件 (DoD 3)
+    trigger_items = []
+    if action == "BUY":
+        if entry_plan and str(entry_plan).strip() != "":
+            trigger_items.append(f"• 🟢 進場條件：{entry_plan}")
+        trigger_items.append(f"• 🔴 出場條件：{exit_plan}")
+        trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
+    elif action == "HOLD":
+        trigger_items.append(f"• 🛡️ 持股者移動防守條件（停利/停損價位）：{exit_plan}")
+        trigger_items.append(f"• ⏳ 空手者紀律：{defense_plan_empty_hand}")
+        trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
+    elif action == "WAIT":
+        trigger_items.append(f"• ☕ 空倉觀望：靜待量化突破或 V 轉買點確認")
+        trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
+    else: # e.g. EXIT
+        trigger_items.append(f"• 🔴 出場條件：{exit_plan}")
+        trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
+
+    trigger_plan_text = "\n".join(trigger_items)
+
+    # 格式化為高資訊密度 Markdown 排版
     message = (
         "🔔 【AI 股市決策戰報 - 瑞昱 2379.TW】\n"
         f"📅 數據截止日期：{date} 盤後\n\n"
         "📊 盤後關鍵指標：\n"
         f"• 收盤價：{close} 元\n"
         f"• KD / MACD 狀態：{technical_summary}\n\n"
-        "🎯 軍師王謀戰術決策：\n"
-        f"• 動作建議：{action}\n"
-        f"• 預估勝率：{win_rate}%\n"
-        f"• 建議倉位：{suggested_position_pct}%\n\n"
+        f"{tactical_decision_text}\n\n"
         "📝 隔日事前觸發計畫：\n"
-        f"• 🟢 進場條件：{entry_plan}\n"
-        f"• 🔴 出場條件：{exit_plan}\n"
-        f"• ⚠️ 跳空防守：{gap_defense_note}\n\n"
+        f"{trigger_plan_text}\n\n"
         "🧠 軍師王謀定性診斷：\n"
         f"{wang_mou_analysis}"
     )

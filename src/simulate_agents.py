@@ -1491,6 +1491,7 @@ def execute_simulation_pipeline():
     
     # B. 運算 9 大實體 Agent 並保存其交易履歷對照
     all_agent_journals = {}
+    agents_backtest_stats = []
     for cfg in AGENT_CONFIGS:
         backtest_stats = run_agent_backtest(df_hist, cfg)
         all_agent_journals[cfg.name] = backtest_stats.get("journals", [])
@@ -1498,6 +1499,7 @@ def execute_simulation_pipeline():
         # 今日決策
         state_for_today = AgentState(initial_capital=backtest_stats["final_capital"])
         state_for_today.shares = int(backtest_stats["current_holding"] * backtest_stats["final_capital"] / latest_row['Close']) if latest_row['Close'] > 0 else 0
+        state_for_today.weighted_avg_cost = backtest_stats["entry_price"]
         
         p_conj_today = float(latest_row.get('AI_Probability', 0.5))
         z_bias_today = float(latest_row.get('Z_Score_BIAS', latest_row.get('Z-Score', latest_row.get('Z_Score', 0.0))))
@@ -1540,6 +1542,65 @@ def execute_simulation_pipeline():
                 "position": today_position
             }
         })
+
+        # 對於 today_action，依據今日動作決定：BUY, EXIT, HOLD, WAIT (DoD 1)
+        if today_action in ["BUY", "ALL_IN_TRIGGER", "SCALE_IN_TRIGGER"]:
+            today_act_mapped = "BUY"
+        elif today_action in ["EXIT", "SELL", "HARD_STOP_LOSS_8PCT", "EXIT_WEAK_TREND"]:
+            today_act_mapped = "EXIT"
+        elif today_action in ["HOLD", "HOLD_BUY", "HOLDING_CONTINUATION"]:
+            today_act_mapped = "HOLD"
+        else:
+            today_act_mapped = "WAIT"
+
+        agents_backtest_stats.append({
+            "name": cfg.name,
+            "roi_pct": backtest_stats["roi_pct"],
+            "today_action": today_act_mapped,
+            "shares": state_for_today.shares,
+            "entry_price": state_for_today.weighted_avg_cost
+        })
+
+    # C. 選拔全年度累計 ROI 冠軍 Agent (同分優先級 A8 > A9 > A7) (DoD 1)
+    priority_order = {
+        "A8_TOP_DEFENSE_MODERATE": 0,
+        "A9_TOP_DEFENSE_CONSERVATIVE": 1,
+        "A7_TOP_DEFENSE_AGGRESSIVE": 2
+    }
+    
+    def get_sort_key(item):
+        prio = priority_order.get(item["name"], 999)
+        return (-item["roi_pct"], prio, item["name"])
+        
+    sorted_for_champion = sorted(agents_backtest_stats, key=get_sort_key)
+    champion = sorted_for_champion[0]
+    
+    champion_summary = {
+        "agent_id": champion["name"],
+        "annual_roi": float(champion["roi_pct"]),
+        "today_action": champion["today_action"],
+        "holding_status": "HOLDING" if champion["shares"] > 0 else "EMPTY",
+        "entry_price": float(champion["entry_price"]),
+        "shares": int(champion["shares"])
+    }
+    
+    # 寫入或更新 data/isd_predict_report.json
+    isd_data = {}
+    if os.path.exists(isd_path):
+        try:
+            with open(isd_path, "r", encoding="utf-8") as f:
+                isd_data = json.load(f)
+        except Exception:
+            pass
+            
+    isd_data["champion_summary"] = champion_summary
+    
+    try:
+        with open(isd_path, "w", encoding="utf-8") as f:
+            json.dump(isd_data, f, indent=2, ensure_ascii=False)
+        print(f"🚦 [ISD 風控與動態冠軍同步寫入成功]：{isd_path}")
+    except Exception as e:
+        print(f"⚠️ 寫入 isd_predict_report.json 失敗 ({e})")
 
     # C. 戰力評分 score 與評級 tier 換算與注入 (V3.8)
     r_bh = benchmark_results["#0_BENCHMARK_BUY_HOLD"]["roi_pct"]

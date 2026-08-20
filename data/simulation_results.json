@@ -1,8 +1,8 @@
 {
   "engine_version": "V5.3",
-  "timestamp": "2026-08-13T11:44:14",
-  "isdTriggered": true,
-  "backtest_range": "2026-01-02 to 2026-08-12",
+  "timestamp": "2026-08-20T18:30:12",
+  "isdTriggered": false,
+  "backtest_range": "2026-01-02 to 2026-08-18",
   "agents": [
     {
       "agent_id": "Agent_0",
@@ -29,19 +29,19 @@
       "name": "A1_V_REVERSAL_AGGRESSIVE",
       "tactical_group": "V_REVERSAL",
       "backtest": {
-        "final_capital": 200153.03,
-        "roi_pct": 100.15,
-        "win_rate": 50.0,
-        "max_drawdown_pct": 13.74,
-        "total_trades": 6,
-        "buy_count": 7,
-        "sell_count": 6
+        "final_capital": 186172.73,
+        "roi_pct": 86.17,
+        "win_rate": 60.0,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 5,
+        "buy_count": 6,
+        "sell_count": 5
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 67.97,
+      "score": 65.02,
       "tier": "GOOD"
     },
     {
@@ -49,19 +49,19 @@
       "name": "A2_V_REVERSAL_MODERATE",
       "tactical_group": "V_REVERSAL",
       "backtest": {
-        "final_capital": 205134.57,
-        "roi_pct": 105.13,
-        "win_rate": 66.67,
-        "max_drawdown_pct": 11.56,
-        "total_trades": 6,
-        "buy_count": 7,
-        "sell_count": 6
+        "final_capital": 186172.73,
+        "roi_pct": 86.17,
+        "win_rate": 60.0,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 5,
+        "buy_count": 6,
+        "sell_count": 5
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 69.02,
+      "score": 65.02,
       "tier": "GOOD"
     },
     {
@@ -69,19 +69,19 @@
       "name": "A3_V_REVERSAL_CONSERVATIVE",
       "tactical_group": "V_REVERSAL",
       "backtest": {
-        "final_capital": 202366.78,
-        "roi_pct": 102.37,
-        "win_rate": 50.0,
-        "max_drawdown_pct": 11.77,
-        "total_trades": 6,
-        "buy_count": 7,
-        "sell_count": 6
+        "final_capital": 186172.73,
+        "roi_pct": 86.17,
+        "win_rate": 60.0,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 5,
+        "buy_count": 6,
+        "sell_count": 5
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 68.43,
+      "score": 65.02,
       "tier": "GOOD"
     },
     {
@@ -89,19 +89,19 @@
       "name": "A4_MOMENTUM_AGGRESSIVE",
       "tactical_group": "MOMENTUM",
       "backtest": {
-        "final_capital": 200153.03,
-        "roi_pct": 100.15,
-        "win_rate": 50.0,
-        "max_drawdown_pct": 13.74,
-        "total_trades": 6,
-        "buy_count": 7,
-        "sell_count": 6
+        "final_capital": 186172.73,
+        "roi_pct": 86.17,
+        "win_rate": 60.0,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 5,
+        "buy_count": 6,
+        "sell_count": 5
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 67.97,
+      "score": 65.02,
       "tier": "GOOD"
     },
     {
@@ -109,19 +109,19 @@
       "name": "A5_MOMENTUM_MODERATE",
       "tactical_group": "MOMENTUM",
       "backtest": {
-        "final_capital": 205134.57,
-        "roi_pct": 105.13,
-        "win_rate": 66.67,
-        "max_drawdown_pct": 11.56,
-        "total_trades": 6,
-        "buy_count": 7,
-        "sell_count": 6
+        "final_capital": 186172.73,
+        "roi_pct": 86.17,
+        "win_rate": 60.0,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 5,
+        "buy_count": 6,
+        "sell_count": 5
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 69.02,
+      "score": 65.02,
       "tier": "GOOD"
     },
     {
@@ -129,19 +129,19 @@
       "name": "A6_MOMENTUM_CONSERVATIVE",
       "tactical_group": "MOMENTUM",
       "backtest": {
-        "final_capital": 202366.78,
-        "roi_pct": 102.37,
-        "win_rate": 50.0,
-        "max_drawdown_pct": 11.77,
-        "total_trades": 6,
-        "buy_count": 7,
-        "sell_count": 6
+        "final_capital": 186172.73,
+        "roi_pct": 86.17,
+        "win_rate": 60.0,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 5,
+        "buy_count": 6,
+        "sell_count": 5
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 68.43,
+      "score": 65.02,
       "tier": "GOOD"
     },
     {
@@ -149,19 +149,19 @@
       "name": "A7_TOP_DEFENSE_AGGRESSIVE",
       "tactical_group": "TOP_DEFENSE",
       "backtest": {
-        "final_capital": 229601.35,
-        "roi_pct": 129.6,
-        "win_rate": 62.5,
-        "max_drawdown_pct": 13.74,
-        "total_trades": 8,
-        "buy_count": 9,
-        "sell_count": 8
+        "final_capital": 213856.62,
+        "roi_pct": 113.86,
+        "win_rate": 71.43,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 7,
+        "buy_count": 8,
+        "sell_count": 7
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 74.18,
+      "score": 70.86,
       "tier": "GOOD"
     },
     {
@@ -169,39 +169,39 @@
       "name": "A8_TOP_DEFENSE_MODERATE",
       "tactical_group": "TOP_DEFENSE",
       "backtest": {
-        "final_capital": 235452.27,
-        "roi_pct": 135.45,
-        "win_rate": 75.0,
-        "max_drawdown_pct": 11.56,
-        "total_trades": 8,
-        "buy_count": 9,
-        "sell_count": 8
+        "final_capital": 213856.62,
+        "roi_pct": 113.86,
+        "win_rate": 71.43,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 7,
+        "buy_count": 8,
+        "sell_count": 7
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 75.41,
-      "tier": "EXCELLENT"
+      "score": 70.86,
+      "tier": "GOOD"
     },
     {
       "agent_id": "Agent_9",
       "name": "A9_TOP_DEFENSE_CONSERVATIVE",
       "tactical_group": "TOP_DEFENSE",
       "backtest": {
-        "final_capital": 227533.89,
-        "roi_pct": 127.53,
-        "win_rate": 62.5,
-        "max_drawdown_pct": 11.77,
-        "total_trades": 8,
-        "buy_count": 9,
-        "sell_count": 8
+        "final_capital": 209464.47,
+        "roi_pct": 109.46,
+        "win_rate": 71.43,
+        "max_drawdown_pct": 13.35,
+        "total_trades": 7,
+        "buy_count": 8,
+        "sell_count": 7
       },
       "today_decision": {
-        "action": "EXIT",
-        "position": 0.0
+        "action": "HOLD",
+        "position": 1.0
       },
-      "score": 73.74,
+      "score": 69.93,
       "tier": "GOOD"
     }
   ]
