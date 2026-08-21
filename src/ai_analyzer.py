@@ -5,13 +5,22 @@ import time
 from google import genai
 from google.genai import types
 
+# 動作中文映射字典
+ACTION_CHINESE_MAP = {
+    "BUY": "【🎯 進場買進】",
+    "HOLD": "【🛡️ 持股續抱】",
+    "WAIT": "【☕ 空手觀望】",
+    "EXIT": "【🚨 平倉出場】"
+}
+
 def _parse_trade_journals(journal_path: str) -> dict:
     """
     解析 data/trade_journals.json 中的 A8_TOP_DEFENSE_MODERATE 與 #2_HUMAN_GOLD_STANDARD 資訊
+    (徹底去個人帳本化：移除任何個人持股數、買入日期、成本等敏感帳本字樣，僅萃取客觀波段勝率與歷史波段數)
     """
     default_res = {
-        "human_summary": "歷史波段：無數據；目前無即時持倉。",
-        "a8_summary": "歷史波段：無數據；即時持倉：無；出場教訓：無"
+        "human_summary": "歷史波段：已完成多波段客觀量化回測。目前處於空倉觀望中。",
+        "a8_summary": "歷史波段：完成多波段客觀往返交易。目前空手觀望，出場教訓：嚴格執行移動防守軌道、過熱逃頂避開拉回。"
     }
     if not os.path.exists(journal_path):
         return default_res
@@ -20,46 +29,37 @@ def _parse_trade_journals(journal_path: str) -> dict:
             data = json.load(f)
         journals = data.get("journals", {})
         
-        # 1. 解析 #2_HUMAN_GOLD_STANDARD (人類黃金基準)
+        # 1. 解析 #2_HUMAN_GOLD_STANDARD (人類黃金基準) - 去個人帳本化
         human_list = journals.get("#2_HUMAN_GOLD_STANDARD", [])
         if human_list:
             total_waves = len(human_list)
-            total_pnl = sum(float(w.get("realized_pnl", 0.0)) for w in human_list)
-            avg_pnl_pct = sum(float(w.get("pnl_pct", 0.0)) for w in human_list) / total_waves if total_waves > 0 else 0.0
-            human_summary = f"歷史波段：已完成 {total_waves} 個波段交易，累計實現損益 ${total_pnl:.2f} 元，平均波段報酬率 {avg_pnl_pct:.2f}%。目前無即時持倉。"
+            human_summary = f"歷史波段：已完成 {total_waves} 個波段交易。目前處於空倉觀望狀態。"
         else:
-            human_summary = "歷史波段：無資料；目前無即時持倉。"
+            human_summary = "歷史波段：無資料；目前處於空倉觀望狀態。"
             
-        # 2. 解析 A8_TOP_DEFENSE_MODERATE (穩健冠軍)
+        # 2. 解析 A8_TOP_DEFENSE_MODERATE (穩健冠軍) - 去個人帳本化
         a8_list = journals.get("A8_TOP_DEFENSE_MODERATE", [])
         if a8_list:
-            holding = "無"
-            exit_lessons = []
             completed_trades = 0
-            total_realized_pnl = 0.0
+            exit_lessons = []
             
-            last_buy = None
             for tx in a8_list:
                 action = tx.get("action")
-                date = tx.get("date")
-                price = tx.get("price")
                 reason = tx.get("reason")
-                if action == "BUY":
-                    last_buy = tx
-                    holding = f"持倉中 (買入日期: {date}, 價格: {price}, 股數: {tx.get('shares')}, 買入原因: {reason})"
-                elif action == "SELL":
+                if action == "SELL":
                     completed_trades += 1
-                    exit_lessons.append(f"{date} 因 {reason} 平倉離場 (價格: {price})" if reason else f"{date} 平倉離場")
-                    if last_buy:
-                        pnl = float(tx.get("amount", 0.0)) - float(last_buy.get("amount", 0.0))
-                        total_realized_pnl += pnl
-                    holding = "無 (已平倉)"
-                    last_buy = None
+                    # 轉換為客觀說明，去除價格、日期與股數
+                    if "stop_loss" in str(reason).lower():
+                        exit_lessons.append("觸發 8% 物理硬停損軌道")
+                    elif "overheat" in str(reason).lower() or "z_bias" in str(reason).lower():
+                        exit_lessons.append("指標過熱逃頂防禦")
+                    else:
+                        exit_lessons.append("移動防守軌道平倉")
             
-            lessons_str = "、".join(exit_lessons[-3:]) if exit_lessons else "無"
-            a8_summary = f"歷史波段：完成 {completed_trades} 次往返交易，累計實現損益 ${total_realized_pnl:.2f} 元。即時持倉：{holding}。出場教訓：{lessons_str}。"
+            lessons_str = "、".join(list(set(exit_lessons))[-2:]) if exit_lessons else "嚴格執行移動停損與高檔逃頂防禦"
+            a8_summary = f"歷史波段：完成 {completed_trades} 次往返交易。目前處於空手狀態。歷史離場教訓：{lessons_str}。"
         else:
-            a8_summary = "歷史波段：無資料；即時持倉：無；出場教訓：無。"
+            a8_summary = "歷史波段：無資料；目前處於空手狀態。"
             
         return {
             "human_summary": human_summary,
@@ -114,15 +114,16 @@ def run_ai_analysis(
     macd_part = macd_summary.split('(')[1].split(')')[0] if '(' in str(macd_summary) else str(macd_summary)
     tech_summary = f"KD: {kd_part.strip()} / MACD: {macd_part.strip()}"
 
-    # 3. 讀取並解析交易日誌
+    # 3. 讀取並解析交易日誌 (去個人帳本化)
     journal_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(report_path)), "trade_journals.json"))
     journal_data = _parse_trade_journals(journal_path)
     human_summary = journal_data["human_summary"]
     a8_summary = journal_data["a8_summary"]
 
-    # 4. 讀取 isd_predict_report.json 獲取動態選拔的冠軍資訊 (DoD 2)
+    # 4. 讀取 isd_predict_report.json 獲取動態選拔的冠軍資訊
     champion_agent = "A8_TOP_DEFENSE_MODERATE"
-    action = "HOLD"
+    raw_action = "HOLD"
+    champion_reason = "HOLDING_CONTINUATION"
     
     isd_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(report_path)), "isd_predict_report.json"))
     if os.path.exists(isd_path):
@@ -132,7 +133,8 @@ def run_ai_analysis(
             summary = isd_data.get("champion_summary")
             if summary:
                 champion_agent = summary.get("agent_id", "A8_TOP_DEFENSE_MODERATE")
-                action = summary.get("today_action", "HOLD")
+                raw_action = summary.get("today_action", "HOLD")
+                champion_reason = summary.get("reason", "HOLDING_CONTINUATION")
             else:
                 print("[Warning] champion_summary missing", file=sys.stderr)
         except Exception as e:
@@ -140,17 +142,30 @@ def run_ai_analysis(
     else:
         print("[Warning] champion_summary missing", file=sys.stderr)
 
+    # 安全校驗與 Action 全中文化對齊 (DoD 3)
+    # 未定義的 Action 安全回歸至 WAIT
+    if raw_action not in ACTION_CHINESE_MAP:
+        print(f"[Warning] Unknown action: {raw_action}", file=sys.stderr)
+        raw_action = "WAIT"
+        
+    action_chinese = ACTION_CHINESE_MAP[raw_action]
+
+    # 解析 EXIT 退場原因 (動能轉弱保本防禦 / 雙重指標過熱逃頂)
+    exit_reason = "動能轉弱保本防禦"
+    if "overheat" in str(champion_reason).lower() or "z_bias" in str(champion_reason).lower():
+        exit_reason = "雙重指標過熱逃頂"
+
     # 5. 準備保底降級回覆 (Fallback Response)
     fallback_res = {
         "date": str(date).strip(),
         "close": close_val,
         "technical_summary": tech_summary,
         "champion_agent": champion_agent,
-        "action": action,
-        "suggested_position": 0.0 if action != "BUY" else 0.1,
-        "entry_plan": None if action != "BUY" else f"回測至 {round(close_val * 0.97, 1)} (-3.0%) 考慮進場",
-        "exit_plan": f"達 {round(close_val * 1.05, 1)} (+5.0%) 停利 / 跌破 {round(close_val * 0.95, 1)} (-5.0%) 嚴格停損",
-        "defense_plan_empty_hand": "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號" if action != "BUY" else "不適用",
+        "action": action_chinese,
+        "suggested_position": 0.0 if raw_action != "BUY" else 0.1,
+        "entry_plan": None if raw_action != "BUY" else f"回測至 {round(close_val * 0.97, 1)} (-3.0%) 考慮進場",
+        "exit_plan": f"達 {round(close_val * 1.05, 1)} (+5.0%) 停利 / 跌破 {round(close_val * 0.95, 1)} (-5.0%) 嚴格停損" if raw_action in ["BUY", "HOLD"] else (f"觸發{exit_reason}機制，今日部位全數平倉出清，轉為空手觀望，資金落袋防守" if raw_action == "EXIT" else None),
+        "defense_plan_empty_hand": "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號" if raw_action in ["HOLD", "EXIT"] else ("當前無標準量化買點，耐性等待籌碼築底或明確突破訊號" if raw_action == "WAIT" else "不適用"),
         "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
         "wang_mou_analysis": "API 連線異常，啟用防禦性降級，暫時維持原有戰術守則。",
         "llm_fallback": True
@@ -176,19 +191,27 @@ def run_ai_analysis(
         "你必須嚴格遵守輸出 JSON 規格，不包含任何 Markdown 標記、JSON 標籤、或任何前後言雜訊。"
     )
 
-    # 依據今日狀態動態切換硬性約束，抑制非買點進場計畫生成 (DoD 2)
-    if action in ["HOLD", "WAIT", "EXIT"]:
+    # 依據今日狀態與去帳本化動態切換硬性約束，抑制非買點進場計畫生成 (DoD 3)
+    if raw_action in ["HOLD", "EXIT", "WAIT"]:
+        if raw_action == "EXIT":
+            exit_detail_instruction = f"平倉出場日：1. 嚴禁在 entry_plan 填入任何價格。2. exit_plan 必須且只能設定為: '觸發{exit_reason}機制，今日部位全數平倉出清，轉為空手觀望，資金落袋防守'。3. suggested_position 必須強制設為 0.0。"
+        elif raw_action == "WAIT":
+            exit_detail_instruction = "空手觀望日：1. 嚴禁在 entry_plan 和 exit_plan 填入任何看多停利/停損價位，兩者必須強制為 null。2. suggested_position 必須為 0.0。"
+        else: # HOLD
+            exit_detail_instruction = "持股續抱日：1. 嚴禁在 entry_plan 填入任何價格，必須強制為 null。2. 必須在 exit_plan 填入移動防守線。3. 建議倉位與勝率需大於 0.0。"
+
         hard_constraint = (
             "\n🔴 【硬性約束門禁 (Hard Constraint)】：\n"
-            f"目前最新量化冠軍 Agent 判定今日訊號為 {action} (非買點日)。\n"
-            "1. 嚴禁在回覆中生成任何形式的進場價位、回測低接或試單買點！\n"
-            "2. 回傳 JSON 的 'entry_plan' 欄位必須強制設定為 null。\n"
-            "3. 必須在 'defense_plan_empty_hand' 欄位中提供空手者紀律：'波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號'。\n"
+            f"目前最新量化冠軍 Agent 判定今日訊號為 {action_chinese} (非買點日)。\n"
+            "1. 嚴禁在回覆中生成或編造任何進場低接價格、建倉計畫或試單買點！\n"
+            "2. 嚴禁在戰報與王謀分析中，提及任何 Agent 個人持倉帳本細節（如持股股數、買入日期、個人成本價）。\n"
+            f"3. 具體防守規則：{exit_detail_instruction}\n"
+            "4. 必須在 'defense_plan_empty_hand' 欄位中提供空手者紀律：'波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號'。\n"
         )
     else:
         hard_constraint = (
             "\n🟢 【進場建倉提示】：\n"
-            f"目前今日訊號為 BUY (黃金買點日)。\n"
+            f"目前今日訊號為 {action_chinese} (黃金買點日)。\n"
             "1. 請在 'entry_plan' 欄位中生成黃金買點建倉計畫（必須包含具體價格如 $XXX 與相對今日收盤價的百分比變動，如 -X.X%）。\n"
             "2. 建議倉位 'suggested_position' 應根據勝率進行大膽配置（大於 0.0 且最大為 1.0）。\n"
             "3. 'defense_plan_empty_hand' 可設定為 '不適用'。\n"
@@ -214,7 +237,7 @@ def run_ai_analysis(
       "close": {close_val},
       "technical_summary": "{tech_summary}",
       "champion_agent": "{champion_agent}",
-      "action": "{action}",
+      "action": "{action_chinese}",
       "suggested_position": 0.0,
       "entry_plan": null,
       "exit_plan": "達 $XXX (+X.X%) 停利 / 跌破 $XXX (-X.X%) 嚴格停損",
@@ -272,17 +295,44 @@ def run_ai_analysis(
         return fallback_res
 
     # 10. JSON Schema 欄位缺失與硬性安全校驗自動補防
-    final_action = str(data.get("action", action)).strip()
+    final_action = str(data.get("action", action_chinese)).strip()
+    
+    # 逆向轉換為原始英文字串以便判定
+    raw_action_reversed = "WAIT"
+    for k, v in ACTION_CHINESE_MAP.items():
+        if v == final_action or k == final_action:
+            raw_action_reversed = k
+            break
+            
     final_suggested_pos = float(data.get("suggested_position", 0.0))
     final_entry_plan = data.get("entry_plan")
+    final_exit_plan = data.get("exit_plan")
+    final_defense_empty_hand = data.get("defense_plan_empty_hand", fallback_res["defense_plan_empty_hand"])
     
-    # 硬性抑制非買點進場計畫生成 (DoD 2)
-    if final_action != "BUY":
+    # [DoD 3 & Edge Case] 強制攔截非 BUY 下的失效看多目標價，以及 EXIT/WAIT 的純淨化處理
+    if raw_action_reversed != "BUY":
         final_suggested_pos = 0.0
         final_entry_plan = None
+        
+        if raw_action_reversed == "EXIT":
+            # [Edge Case] API 在 EXIT 狀態仍回傳 exit_plan 價位時，代碼層實施硬性過濾覆寫
+            final_exit_plan = f"觸發{exit_reason}機制，今日部位全數平倉出清，轉為空手觀望，資金落袋防守"
+            final_defense_empty_hand = "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號"
+        elif raw_action_reversed == "WAIT":
+            # WAIT 觀望日完全隱藏所有價位
+            final_exit_plan = None
+            final_defense_empty_hand = "當前無標準量化買點，耐性等待籌碼築底或明確突破訊號"
+        else: # HOLD
+            if final_exit_plan is None or str(final_exit_plan).strip() == "":
+                final_exit_plan = fallback_res["exit_plan"]
+            final_defense_empty_hand = "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號"
     else:
+        # BUY 狀態
         if final_entry_plan is None or str(final_entry_plan).strip() == "":
             final_entry_plan = fallback_res["entry_plan"]
+        if final_exit_plan is None or str(final_exit_plan).strip() == "":
+            final_exit_plan = fallback_res["exit_plan"]
+        final_defense_empty_hand = "不適用"
 
     final_res = {
         "date": str(data.get("date", date)).strip(),
@@ -292,8 +342,8 @@ def run_ai_analysis(
         "action": final_action,
         "suggested_position": final_suggested_pos,
         "entry_plan": final_entry_plan,
-        "exit_plan": str(data.get("exit_plan", fallback_res["exit_plan"])).strip(),
-        "defense_plan_empty_hand": str(data.get("defense_plan_empty_hand", fallback_res["defense_plan_empty_hand"])).strip(),
+        "exit_plan": final_exit_plan,
+        "defense_plan_empty_hand": str(final_defense_empty_hand).strip(),
         "gap_defense_note": str(data.get("gap_defense_note", fallback_res["gap_defense_note"])).strip(),
         "wang_mou_analysis": str(data.get("wang_mou_analysis", "分析未明。")).strip(),
         "llm_fallback": False

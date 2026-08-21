@@ -150,17 +150,20 @@ def test_ai_analyzer_fail_fast_missing_macd(valid_features):
 
 
 def test_parse_trade_journals_success(mock_trade_journals):
-    """測試解析交易日誌成功情境"""
+    """測試解析交易日誌成功情境 (且確認去個人帳本化：不含價格與持股數)"""
     res = _parse_trade_journals(mock_trade_journals)
-    assert "已完成 1 個波段交易" in res["human_summary"]
+    assert "完成 1 個波段交易" in res["human_summary"]
     assert "完成 1 次往返交易" in res["a8_summary"]
-    assert "HARD_STOP_LOSS_8PCT" in res["a8_summary"]
+    assert "停損" in res["a8_summary"]
+    # 徹底去個人帳本化
+    assert "買入價格" not in res["a8_summary"]
+    assert "股數" not in res["a8_summary"]
 
 def test_parse_trade_journals_missing_file():
-    """測試當交易日誌不存在時，應能優雅保底且向 sys.stderr 輸出日誌"""
+    """測試當交易日誌不存在時，應能優雅保底"""
     res = _parse_trade_journals("non_existent_path.json")
-    assert "歷史波段：無數據" in res["human_summary"]
-    assert "歷史波段：無數據" in res["a8_summary"]
+    assert "歷史波段：已完成多波段" in res["human_summary"]
+    assert "歷史波段：完成多波段" in res["a8_summary"]
 
 
 @patch("src.ai_analyzer.genai.Client")
@@ -170,7 +173,7 @@ def test_ai_analyzer_success_buy(mock_client_class, mock_trade_journals, mock_is
     {
       "date": "2026-08-17",
       "win_rate": 65,
-      "action": "BUY",
+      "action": "【🎯 進場買進】",
       "suggested_position": 0.1,
       "entry_plan": "回測至 $692.6 (-3.0%) 考慮進場",
       "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
@@ -188,8 +191,7 @@ def test_ai_analyzer_success_buy(mock_client_class, mock_trade_journals, mock_is
         
         assert res["date"] == "2026-08-17"
         assert res["close"] == 714.0
-        assert res["win_rate"] == 65
-        assert res["action"] == "BUY"
+        assert res["action"] == "【🎯 進場買進】"
         assert res["suggested_position"] == 0.1
         assert "692.6" in res["entry_plan"]
         assert res["llm_fallback"] is False
@@ -203,7 +205,7 @@ def test_ai_analyzer_hold_suppression(mock_client_class, mock_trade_journals, mo
     {
       "date": "2026-08-17",
       "win_rate": 50,
-      "action": "HOLD",
+      "action": "【🛡️ 持股續抱】",
       "suggested_position": 0.0,
       "entry_plan": null,
       "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
@@ -219,7 +221,7 @@ def test_ai_analyzer_hold_suppression(mock_client_class, mock_trade_journals, mo
     with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
         res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
         
-        assert res["action"] == "HOLD"
+        assert res["action"] == "【🛡️ 持股續抱】"
         assert res["suggested_position"] == 0.0
         assert res["entry_plan"] is None
         assert "非標準買點" in res["defense_plan_empty_hand"]
@@ -239,7 +241,7 @@ def test_ai_analyzer_missing_champion_summary(mock_client_class, mock_trade_jour
     {
       "date": "2026-08-17",
       "win_rate": 50,
-      "action": "HOLD",
+      "action": "【🛡️ 持股續抱】",
       "suggested_position": 0.0,
       "entry_plan": null,
       "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
@@ -256,7 +258,7 @@ def test_ai_analyzer_missing_champion_summary(mock_client_class, mock_trade_jour
         res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
         
         assert res["champion_agent"] == "A8_TOP_DEFENSE_MODERATE"
-        assert res["action"] == "HOLD"
+        assert res["action"] == "【🛡️ 持股續抱】"
         
         # 驗證 sys.stderr
         captured = capsys.readouterr()
@@ -271,7 +273,7 @@ def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, mock_trade_j
     {
       "date": "2026-08-17",
       "win_rate": 65,
-      "action": "BUY",
+      "action": "【🎯 進場買進】",
       "suggested_position": 0.1,
       "entry_plan": "回測至 692.6 (-3.0%) 考慮進場",
       "exit_plan": "達 749.7 (+5.0%) 停利 / 跌破 678.3 (-5.0%) 嚴格停損",
@@ -292,7 +294,7 @@ def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, mock_trade_j
         
         assert res["date"] == "2026-08-17"
         assert res["close"] == 714.0
-        assert res["win_rate"] == 65
+        assert res["action"] == "【🎯 進場買進】"
         assert res["llm_fallback"] is False
         
         # 驗證呼叫了 2 次 models.generate_content
