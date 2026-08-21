@@ -1575,13 +1575,30 @@ def execute_simulation_pipeline():
     sorted_for_champion = sorted(agents_backtest_stats, key=get_sort_key)
     champion = sorted_for_champion[0]
     
+    # 判斷是否在持倉 HOLD 下觸發新買訊 (無 ISD 熔斷且符合高勝率旁路門檻) (DoD 1)
+    today_new_buy_triggered = False
+    if champion["today_action"] == "HOLD":
+        champion_cfg = next(cfg for cfg in AGENT_CONFIGS if cfg.name == champion["name"])
+        bypass_threshold = 0.75
+        if champion_cfg.risk_profile == "AGGRESSIVE":
+            bypass_threshold = 0.70
+        elif champion_cfg.risk_profile == "MODERATE":
+            bypass_threshold = 0.75
+        elif champion_cfg.risk_profile == "CONSERVATIVE":
+            bypass_threshold = 0.80
+            
+        p_conj_today = float(latest_row.get('AI_Probability', 0.5))
+        if p_conj_today >= bypass_threshold and not isd_triggered:
+            today_new_buy_triggered = True
+
     champion_summary = {
         "agent_id": champion["name"],
         "annual_roi": float(champion["roi_pct"]),
         "today_action": champion["today_action"],
         "holding_status": "HOLDING" if champion["shares"] > 0 else "EMPTY",
         "entry_price": float(champion["entry_price"]),
-        "shares": int(champion["shares"])
+        "shares": int(champion["shares"]),
+        "today_new_buy_triggered": today_new_buy_triggered
     }
     
     # 寫入或更新 data/isd_predict_report.json

@@ -30,7 +30,7 @@ def mock_isd_report_buy(tmp_path):
 
 @pytest.fixture
 def mock_isd_report_hold(tmp_path):
-    """建立包含 HOLD 冠軍的 isd_predict_report.json"""
+    """建立包含 HOLD 冠軍且無新買訊的 isd_predict_report.json"""
     isd_data = {
         "isdTriggered": False,
         "champion_summary": {
@@ -39,7 +39,28 @@ def mock_isd_report_hold(tmp_path):
             "today_action": "HOLD",
             "holding_status": "HOLDING",
             "entry_price": 700.76,
-            "shares": 305
+            "shares": 305,
+            "today_new_buy_triggered": False
+        }
+    }
+    isd_file = tmp_path / "isd_predict_report.json"
+    with open(isd_file, "w", encoding="utf-8") as f:
+        json.dump(isd_data, f, indent=2, ensure_ascii=False)
+    return str(isd_file)
+
+@pytest.fixture
+def mock_isd_report_hold_with_new_buy(tmp_path):
+    """建立包含 HOLD 冠軍且有新買訊的 isd_predict_report.json"""
+    isd_data = {
+        "isdTriggered": False,
+        "champion_summary": {
+            "agent_id": "A8_TOP_DEFENSE_MODERATE",
+            "annual_roi": 135.45,
+            "today_action": "HOLD",
+            "holding_status": "HOLDING",
+            "entry_price": 700.76,
+            "shares": 305,
+            "today_new_buy_triggered": True
         }
     }
     isd_file = tmp_path / "isd_predict_report.json"
@@ -177,7 +198,6 @@ def test_ai_analyzer_success_buy(mock_client_class, mock_trade_journals, mock_is
       "suggested_position": 0.1,
       "entry_plan": "回測至 $692.6 (-3.0%) 考慮進場",
       "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
-      "defense_plan_empty_hand": "不適用",
       "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
       "wang_mou_analysis": "主力多頭洗盤，指標高檔，王謀定性建議小資金摸底試單。"
     }
@@ -200,7 +220,7 @@ def test_ai_analyzer_success_buy(mock_client_class, mock_trade_journals, mock_is
 
 @patch("src.ai_analyzer.genai.Client")
 def test_ai_analyzer_hold_suppression(mock_client_class, mock_trade_journals, mock_isd_report_hold, valid_features, temp_report_file):
-    """情境 2：今日為 HOLD 訊號 (非買點)，進場計畫強制為 None 且建議倉位強制為 0.0"""
+    """情境 2：今日為 HOLD 訊號且無新買訊 (非買點)，進場計畫強制為 None 且建議倉位強制為 0.0"""
     mock_response_text = """
     {
       "date": "2026-08-17",
@@ -209,7 +229,6 @@ def test_ai_analyzer_hold_suppression(mock_client_class, mock_trade_journals, mo
       "suggested_position": 0.0,
       "entry_plan": null,
       "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
-      "defense_plan_empty_hand": "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號",
       "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
       "wang_mou_analysis": "波段運行中持股續抱。"
     }
@@ -229,9 +248,37 @@ def test_ai_analyzer_hold_suppression(mock_client_class, mock_trade_journals, mo
 
 
 @patch("src.ai_analyzer.genai.Client")
+def test_ai_analyzer_hold_with_new_buy(mock_client_class, mock_trade_journals, mock_isd_report_hold_with_new_buy, valid_features, temp_report_file):
+    """情境 2.5：今日為 HOLD 訊號且有新買訊，解除進場限制，允許生成進場計畫"""
+    mock_response_text = """
+    {
+      "date": "2026-08-17",
+      "win_rate": 65,
+      "action": "【🛡️ 持股續抱】",
+      "suggested_position": 0.1,
+      "entry_plan": "回測至 $692.6 (-3.0%) 考慮進場",
+      "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
+      "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
+      "wang_mou_analysis": "技術面再度觸發黃金買點，允許空手者次級上車！"
+    }
+    """
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = MagicMock(text=mock_response_text)
+    mock_client_class.return_value = mock_client
+    
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "valid_key"}):
+        res = run_ai_analysis(latest_features=valid_features, report_path=temp_report_file)
+        
+        assert res["action"] == "【🛡️ 持股續抱】"
+        assert res["suggested_position"] == 0.1
+        assert res["entry_plan"] == "回測至 $692.6 (-3.0%) 考慮進場"
+        assert res["today_new_buy_triggered"] is True
+        assert res["llm_fallback"] is False
+
+
+@patch("src.ai_analyzer.genai.Client")
 def test_ai_analyzer_missing_champion_summary(mock_client_class, mock_trade_journals, valid_features, temp_report_file, capsys):
     """情境 3：isd_predict_report.json 缺失 champion_summary，輸出 [Warning] 並保底"""
-    # 建立一個不含 champion_summary 的 ISD
     isd_data = {"isdTriggered": False}
     isd_file = os.path.join(os.path.dirname(temp_report_file), "isd_predict_report.json")
     with open(isd_file, "w", encoding="utf-8") as f:
@@ -245,7 +292,6 @@ def test_ai_analyzer_missing_champion_summary(mock_client_class, mock_trade_jour
       "suggested_position": 0.0,
       "entry_plan": null,
       "exit_plan": "達 $749.7 (+5.0%) 停利 / 跌破 $678.3 (-5.0%) 嚴格停損",
-      "defense_plan_empty_hand": "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號",
       "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
       "wang_mou_analysis": "保底診斷。"
     }
@@ -260,7 +306,6 @@ def test_ai_analyzer_missing_champion_summary(mock_client_class, mock_trade_jour
         assert res["champion_agent"] == "A8_TOP_DEFENSE_MODERATE"
         assert res["action"] == "【🛡️ 持股續抱】"
         
-        # 驗證 sys.stderr
         captured = capsys.readouterr()
         assert "champion_summary missing" in captured.err
 
@@ -277,7 +322,6 @@ def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, mock_trade_j
       "suggested_position": 0.1,
       "entry_plan": "回測至 692.6 (-3.0%) 考慮進場",
       "exit_plan": "達 749.7 (+5.0%) 停利 / 跌破 678.3 (-5.0%) 嚴格停損",
-      "defense_plan_empty_hand": "不適用",
       "gap_defense_note": "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價",
       "wang_mou_analysis": "主力多頭洗盤，指標高檔，王謀定性建議小資金摸底試單。"
     }
@@ -297,18 +341,12 @@ def test_ai_analyzer_cascade_success(mock_sleep, mock_client_class, mock_trade_j
         assert res["action"] == "【🎯 進場買進】"
         assert res["llm_fallback"] is False
         
-        # 驗證呼叫了 2 次 models.generate_content
         assert mock_client.models.generate_content.call_count == 2
-        
-        # 驗證模型依序為 gemini-3.7-flash 與 gemini-3.6-flash
         calls = mock_client.models.generate_content.call_args_list
         assert calls[0][1].get("model") == "gemini-3.7-flash"
         assert calls[1][1].get("model") == "gemini-3.6-flash"
         
-        # 驗證 time.sleep(2) 觸發
         mock_sleep.assert_called_once_with(2)
-        
-        # 驗證 sys.stderr 輸出切換警告日誌
         captured = capsys.readouterr()
         assert "[Warning] Primary model (gemini-3.7-flash) failed: Exception - 503" in captured.err
 
@@ -331,7 +369,6 @@ def test_ai_analyzer_cascade_fail_throws_exception(mock_sleep, mock_client_class
         assert mock_client.models.generate_content.call_count == 2
         mock_sleep.assert_called_once_with(2)
         
-        # 驗證 sys.stderr 輸出正確的切換警告、[ERROR] 與 Traceback
         captured = capsys.readouterr()
         assert "[Warning] Primary model (gemini-3.7-flash) failed: Exception - Primary Timeout" in captured.err
         assert "[ERROR] Gemini API Failed on both primary and fallback models: Exception - Fallback Overloaded 503" in captured.err

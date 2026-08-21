@@ -1,21 +1,11 @@
 {
-  "timestamp": "2026-08-21T09:55:52",
-  "stockId": "2379.TW",
-  "status": "BLOCKED_BY_GSI",
-  "isdTriggered": true,
-  "suggestedPosition": 0.0,
-  "prediction": {
-    "pRef": 0.443,
-    "pConj": 0.7246,
-    "predictedChipFlow": null,
-    "predictedAlphaReturn": 0.0418
-  },
-  "riskMetrics": {
-    "dqixStatus": "PASSED",
-    "riValue": 0.7184,
-    "riThreshold": 0.6,
-    "gsiValue": 3.5647,
-    "gsiThreshold": 3.0
-  },
-  "actionableAdvice": "❌ 風控阻斷：偵測到黑天鵝或未知常態空間偏離，全域相似度指數 GSI (3.56) 超過安全門檻 (3.00)，系統強制觀望。"
+  "champion_summary": {
+    "agent_id": "A8_TOP_DEFENSE_MODERATE",
+    "annual_roi": 113.86,
+    "today_action": "HOLD",
+    "holding_status": "HOLDING",
+    "entry_price": 700.7626666666665,
+    "shares": 302,
+    "today_new_buy_triggered": false
+  }
 }

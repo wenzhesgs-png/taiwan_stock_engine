@@ -39,7 +39,7 @@ def send_telegram_notification(
     date = report_data.get("date", "YYYY-MM-DD")
     close = report_data.get("close", 0.0)
     technical_summary = report_data.get("technical_summary", "技術指標數據不足")
-    action = report_data.get("action", "觀望")
+    action = str(report_data.get("action", "【☕ 空手觀望】")).strip()
     win_rate = report_data.get("win_rate", 50)
     suggested_position = report_data.get("suggested_position", 0.0)
     entry_plan = report_data.get("entry_plan")
@@ -47,6 +47,7 @@ def send_telegram_notification(
     gap_defense_note = report_data.get("gap_defense_note", "若隔日遭遇極端跳空開盤，原設定價位立即失效，嚴禁追價")
     defense_plan_empty_hand = report_data.get("defense_plan_empty_hand", "波段運行中，非標準買點嚴禁追高，耐性等待下一輪量化訊號")
     wang_mou_analysis = report_data.get("wang_mou_analysis", "無分析內容")
+    today_new_buy_triggered = report_data.get("today_new_buy_triggered", False)
 
     # 建議倉位轉換為百分比
     try:
@@ -58,39 +59,59 @@ def send_telegram_notification(
     except Exception:
         suggested_position_pct = 0
 
+    # 判定與並列相容 (同時支援中英文格式)
+    is_buy = action in ["BUY", "【🎯 進場買進】"]
+    is_hold = action in ["HOLD", "【🛡️ 持股續抱】"]
+    is_wait = action in ["WAIT", "【☕ 空手觀望】"]
+    is_exit = action in ["EXIT", "【🚨 平倉出場】"]
+
     # 動態組裝「軍師王謀戰術決策」區塊 (DoD 3)
-    if action == "BUY":
+    # HOLD 且觸發新買點狀態下，動作抬頭動態切換為雙軌推播格式
+    if is_hold and today_new_buy_triggered:
+        action_label = "【🛡️ 持股續抱】(🔥 今日觸發空手者/加碼買點)"
+        tactical_header = "🎯 軍師戰術決策："
+    elif is_buy:
+        action_label = "【🎯 進場買進】"
         tactical_header = "🎯 黃金買點建倉計畫（含進場價與建議倉位）："
-        tactical_items = [
-            f"• 動作建議：{action}",
-            f"• 預估勝率：{win_rate}%",
-            f"• 建議倉位：{suggested_position_pct}%"
-        ]
+    elif is_hold:
+        action_label = "【🛡️ 持股續抱】"
+        tactical_header = "🎯 軍師戰術決策："
+    elif is_exit:
+        action_label = "【🚨 平倉出場】"
+        tactical_header = "🎯 軍師戰術決策："
     else:
-        tactical_header = "🎯 軍師王謀戰術決策："
-        tactical_items = [
-            f"• 動作建議：{action}",
-            f"• 預估勝率：{win_rate}%",
-            f"• 建議倉位：{suggested_position_pct}%"
-        ]
+        action_label = "【☕ 空手觀望】"
+        tactical_header = "🎯 軍師戰術決策："
+
+    tactical_items = [
+        f"• 動作建議：{action_label}",
+        f"• 預估勝率：{win_rate}%",
+        f"• 建議倉位：{suggested_position_pct}%"
+    ]
     tactical_decision_text = tactical_header + "\n" + "\n".join(tactical_items)
 
     # 依狀態與進場條件動態構建「隔日事前觸發計畫」區塊的行項目，實現非買點日 100% 隱藏進場條件 (DoD 3)
     trigger_items = []
-    if action == "BUY":
+    if is_buy:
         if entry_plan and str(entry_plan).strip() != "":
             trigger_items.append(f"• 🟢 進場條件：{entry_plan}")
         trigger_items.append(f"• 🔴 出場條件：{exit_plan}")
         trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
-    elif action == "HOLD":
-        trigger_items.append(f"• 🛡️ 持股者移動防守條件（停利/停損價位）：{exit_plan}")
-        trigger_items.append(f"• ⏳ 空手者紀律：{defense_plan_empty_hand}")
-        trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
-    elif action == "WAIT":
-        trigger_items.append(f"• ☕ 空倉觀望：靜待量化突破或 V 轉買點確認")
+    elif is_hold:
+        if today_new_buy_triggered:
+            # 並列渲染
+            trigger_items.append(f"• 🛡️ 持股者移動防守線：{exit_plan}")
+            trigger_items.append(f"• 🟢 空手者/加碼進場條件：{entry_plan}")
+            trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
+        else:
+            trigger_items.append(f"• 🛡️ 持股者移動防守條件（停利/停損價位）：{exit_plan}")
+            trigger_items.append(f"• ⏳ 空手者紀律：{defense_plan_empty_hand}")
+            trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
+    elif is_wait:
+        trigger_items.append(f"• ☕ 觀望等待：當前無標準量化買點，耐性等待籌碼築底或明確突破訊號")
         trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
     else: # e.g. EXIT
-        trigger_items.append(f"• 🔴 出場條件：{exit_plan}")
+        trigger_items.append(f"• 🚨 出場執行：{exit_plan}")
         trigger_items.append(f"• ⚠️ 跳空防守：{gap_defense_note}")
 
     trigger_plan_text = "\n".join(trigger_items)
@@ -109,7 +130,7 @@ def send_telegram_notification(
         f"{wang_mou_analysis}"
     )
 
-    # 建構 Telegram API 呼叫 URL
+    # 建構 Telegram API 呼交 URL
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
         "chat_id": chat_id,
