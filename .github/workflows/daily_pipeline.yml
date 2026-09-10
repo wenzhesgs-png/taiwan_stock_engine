@@ -1,5 +1,9 @@
 name: Daily Tactical Pipeline Run
-
+- name: Inspect Cloud Secret Meta
+        env:
+          KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python -c "import os; k=os.environ.get('KEY',''); print('=== CLOUD SECRET ==='); print('長度:', len(k)); print('前四碼:', k[:4]); print('後四碼:', k[-4:])"
 on:
   schedule:
     # 台灣時間週一至週五 14:30 (UTC 06:30)
