@@ -1,8 +1,9 @@
 name: Daily Tactical Pipeline Run
 
 on:
-  # 台灣時間週一至週五 14:30 (UTC 06:30)
-  - cron: '30 6 * * 1-5'
+  schedule:
+    # 台灣時間週一至週五 14:30 (UTC 06:30)
+    - cron: '30 6 * * 1-5'
   workflow_dispatch:
 
 jobs:
