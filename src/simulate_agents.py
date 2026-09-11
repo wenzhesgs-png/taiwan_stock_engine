@@ -48,6 +48,9 @@ AGENT_CONFIGS = [
     AgentConfig("Agent_7", "A7_TOP_DEFENSE_AGGRESSIVE", "TOP_DEFENSE", p_entry_threshold=0.60, p_hold_threshold=0.55, overheat_z_bias=2.1, position_scale=0.6, risk_profile="AGGRESSIVE"),
     AgentConfig("Agent_8", "A8_TOP_DEFENSE_MODERATE", "TOP_DEFENSE", p_entry_threshold=0.75, p_hold_threshold=0.55, overheat_z_bias=2.0, position_scale=0.8, risk_profile="MODERATE"),
     AgentConfig("Agent_9", "A9_TOP_DEFENSE_CONSERVATIVE", "TOP_DEFENSE", p_entry_threshold=0.85, p_hold_threshold=0.55, overheat_z_bias=1.9, position_scale=1.0, risk_profile="CONSERVATIVE"),
+    
+    # 4. 自適應反思組 (Agent 10)：overheat_z_bias=2.0, p_hold=0.55, p_entry=0.75 (穩健型基線)
+    AgentConfig("Agent_10", "A10_ADAPTIVE_REFLEXION", "TOP_DEFENSE", p_entry_threshold=0.75, p_hold_threshold=0.55, overheat_z_bias=2.0, position_scale=0.8, risk_profile="MODERATE"),
 ]
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -697,6 +700,39 @@ class StrategyPolicyEngine:
         else:
             return {"action": "HOLD", "position": 0.0, "reason": "NO_SIGNAL"}
 
+    @staticmethod
+    def evaluate_a10_trailing_lock(
+        current_max_high: float,
+        close: float,
+        entry_price: float,
+        active_in_reflection: bool
+    ) -> Tuple[bool, str]:
+        """
+        A10 自適應移動鎖利防守 (Adaptive Trailing Stop)
+        - 當 active_in_reflection == True
+        - 若持倉期間未實現獲利曾達到 >= +5.0%
+        - 股價自該筆持倉之最高點回檔幅度 > 3.5%
+        - 當日立即觸發全數平倉出場 (EXIT_TRAILING_LOCK)
+        """
+        if not active_in_reflection or entry_price <= 0.0 or current_max_high <= 0.0:
+            return False, ""
+            
+        mfe = (current_max_high - entry_price) / entry_price
+        if mfe >= 0.05:
+            pullback = (current_max_high - close) / current_max_high
+            if pullback > 0.035:
+                return True, "EXIT_TRAILING_LOCK"
+                
+        return False, ""
+
+    @staticmethod
+    def evaluate_a10_reflection_trigger(mfe: float, roi: float) -> bool:
+        """
+        A10 利潤回吐偵測 (Failure Mode Detection)
+        - 當 MFE >= 0.07 且 ROI <= 0.02 時，標記進入反思警示狀態 (reflective_lock = True)
+        """
+        return (mfe >= 0.07) and (roi <= 0.02)
+
 # ────────────────────────────────────────────────────────────────────────────
 # 2.5. V3.7 新增基礎元件 (AgentState, BenchmarkRunner, Score Mapping)
 # ────────────────────────────────────────────────────────────────────────────
@@ -1254,6 +1290,11 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
     buy_count = 0
     sell_count = 0
     
+    is_a10 = (agent_cfg.name == "A10_ADAPTIVE_REFLEXION")
+    reflective_lock = False
+    active_in_reflection = False
+    current_max_high = 0.0
+    
     for idx, row in df_backtest.iterrows():
         # 1. T+2 資金到帳交割
         state.update_settlement(idx)
@@ -1281,6 +1322,9 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
         # 更新進場後之最高成交價
         if current_position > 0.0:
             state.max_price_since_entry = max(getattr(state, 'max_price_since_entry', 0.0), close)
+            if is_a10:
+                high = float(row.get('High', close))
+                current_max_high = max(current_max_high, high)
 
         # 實施均線支撐自適應勝率遲滯防線 (V5.3 門檻下調至 0.40)：
         # 當股價在 MA20 上方（z_bias >= -0.80，多頭格局未破壞）時，允許勝率跌破 0.40 依然續抱以吃足大波段；
@@ -1307,6 +1351,22 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
             overheat_z_bias=overheat_z_bias,
             isd_triggered=False
         )
+
+        # A10 自適應移動鎖利防守 (Adaptive Trailing Stop)
+        if is_a10 and current_position > 0.0 and active_in_reflection:
+            should_trail_lock, lock_reason = StrategyPolicyEngine.evaluate_a10_trailing_lock(
+                current_max_high=current_max_high,
+                close=close,
+                entry_price=state.weighted_avg_cost,
+                active_in_reflection=active_in_reflection
+            )
+            if should_trail_lock:
+                decision = {
+                    "action": "EXIT",
+                    "suggested_position": 0.0,
+                    "reason": lock_reason
+                }
+
         action = decision["action"]
         position_percent = decision["suggested_position"]
         
@@ -1331,6 +1391,15 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
                 "profit": float(pnl),
                 "profit_pct": float(pnl_pct)
             })
+
+            if is_a10:
+                mfe = (current_max_high - prev_cost) / prev_cost if prev_cost > 0 else 0.0
+                trade_roi = pnl / buy_cost_total if buy_cost_total > 0 else 0.0
+                price_roi = (sell_price - prev_cost) / prev_cost if prev_cost > 0 else 0.0
+                is_giveback = StrategyPolicyEngine.evaluate_a10_reflection_trigger(mfe=mfe, roi=trade_roi) or StrategyPolicyEngine.evaluate_a10_reflection_trigger(mfe=mfe, roi=price_roi)
+                reflective_lock = is_giveback
+                active_in_reflection = False
+                current_max_high = 0.0
             
         elif action == "BUY":
             # 執行買入
@@ -1338,6 +1407,10 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
             state.buy_tranche(row, percent=position_percent, day_idx=idx, agent_id=agent_cfg.name, reason=decision.get("reason", "ENTRY_TRIGGER"), p_conj=p_conj, z_bias=z_bias)
             if state.shares > prev_shares:
                 buy_count += 1
+                if is_a10:
+                    active_in_reflection = reflective_lock
+                    high = float(row.get('High', close))
+                    current_max_high = high
                 
         # 4. 紀錄每日權益
         pos_val = state.shares * close
@@ -1366,7 +1439,11 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
         "entry_price": state.weighted_avg_cost,
         "buy_count": buy_count,
         "sell_count": sell_count,
-        "journals": state.trade_history # V3.9: 導出交易履歷
+        "journals": state.trade_history, # V3.9: 導出交易履歷
+        "holding": state.shares > 0,
+        "reflective_lock": reflective_lock,
+        "active_in_reflection": active_in_reflection,
+        "current_max_high": current_max_high
     }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1515,6 +1592,22 @@ def execute_simulation_pipeline():
             overheat_z_bias=cfg.overheat_z_bias,
             isd_triggered=isd_triggered
         )
+
+        if cfg.name == "A10_ADAPTIVE_REFLEXION" and current_position_today > 0.0 and backtest_stats.get("active_in_reflection", False):
+            high_today = float(latest_row.get('High', latest_row['Close']))
+            max_high = max(backtest_stats.get("current_max_high", high_today), high_today)
+            should_trail_lock, lock_reason = StrategyPolicyEngine.evaluate_a10_trailing_lock(
+                current_max_high=max_high,
+                close=float(latest_row['Close']),
+                entry_price=state_for_today.weighted_avg_cost,
+                active_in_reflection=True
+            )
+            if should_trail_lock:
+                decision = {
+                    "action": "EXIT",
+                    "suggested_position": 0.0,
+                    "reason": lock_reason
+                }
         
         # 套用 ISD 阻斷硬壓制
         if isd_triggered:
@@ -1535,7 +1628,9 @@ def execute_simulation_pipeline():
                 "max_drawdown_pct": backtest_stats["max_drawdown_pct"],
                 "total_trades": backtest_stats["total_trades"],
                 "buy_count": backtest_stats["buy_count"],
-                "sell_count": backtest_stats["sell_count"]
+                "sell_count": backtest_stats["sell_count"],
+                "holding": backtest_stats.get("holding", False),
+                "reflective_lock": backtest_stats.get("reflective_lock", False)
             },
             "today_decision": {
                 "action": today_action,
@@ -1546,7 +1641,7 @@ def execute_simulation_pipeline():
         # 對於 today_action，依據今日動作決定：BUY, EXIT, HOLD, WAIT (DoD 1)
         if today_action in ["BUY", "ALL_IN_TRIGGER", "SCALE_IN_TRIGGER"]:
             today_act_mapped = "BUY"
-        elif today_action in ["EXIT", "SELL", "HARD_STOP_LOSS_8PCT", "EXIT_WEAK_TREND"]:
+        elif today_action in ["EXIT", "SELL", "HARD_STOP_LOSS_8PCT", "EXIT_WEAK_TREND", "EXIT_TRAILING_LOCK"]:
             today_act_mapped = "EXIT"
         elif today_action in ["HOLD", "HOLD_BUY", "HOLDING_CONTINUATION"]:
             today_act_mapped = "HOLD"
@@ -1561,11 +1656,12 @@ def execute_simulation_pipeline():
             "entry_price": state_for_today.weighted_avg_cost
         })
 
-    # C. 選拔全年度累計 ROI 冠軍 Agent (同分優先級 A8 > A9 > A7) (DoD 1)
+    # C. 選拔全年度累計 ROI 冠軍 Agent (同分優先級 A8 > A9 > A7 > A10) (DoD 1)
     priority_order = {
         "A8_TOP_DEFENSE_MODERATE": 0,
         "A9_TOP_DEFENSE_CONSERVATIVE": 1,
-        "A7_TOP_DEFENSE_AGGRESSIVE": 2
+        "A7_TOP_DEFENSE_AGGRESSIVE": 2,
+        "A10_ADAPTIVE_REFLEXION": 3
     }
     
     def get_sort_key(item):
@@ -1642,7 +1738,7 @@ def execute_simulation_pipeline():
         r["score"] = round(score_val, 2)
         r["tier"] = get_tier(score_val)
         
-    # 4. 打包導出 JSON (此處含有 10 個 items: 1 benchmark + 9 agents)
+    # 4. 打包導出 JSON (此處含有 11 個 items: 1 benchmark + 10 agents)
     simulation_output = {
         "engine_version": "V5.3",
         "timestamp": datetime.datetime.now().isoformat()[:19],
@@ -1650,6 +1746,20 @@ def execute_simulation_pipeline():
         "backtest_range": f"{start_date_str} to {end_date_str}",
         "agents": agents_results
     }
+    
+    # A10 自適應反思智能體節點擴充 Schema
+    a10_stats = next((r for r in agents_results if r["name"] == "A10_ADAPTIVE_REFLEXION"), None)
+    if a10_stats:
+        b = a10_stats["backtest"]
+        simulation_output["A10_ADAPTIVE_REFLEXION"] = {
+            "initial_capital": 1000000.0,
+            "final_capital": round(1000000.0 * (1.0 + b["roi_pct"] / 100.0), 2),
+            "total_return_pct": b["roi_pct"],
+            "win_rate": round(b["win_rate"] / 100.0, 4) if b["win_rate"] > 1.0 else b["win_rate"],
+            "total_trades": b["total_trades"],
+            "holding": b.get("holding", False),
+            "reflective_lock": b.get("reflective_lock", False)
+        }
     
     output_path = os.path.join(current_dir, "..", "data", "simulation_results.json")
     try:

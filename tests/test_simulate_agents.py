@@ -140,8 +140,9 @@ def test_full_simulation_pipeline():
     assert "isdTriggered" in data
     assert "agents" in data
     
-    # 驗證包含 #0 Benchmark 在內共有 10 個策略 (1 Benchmark + 9 Agents)
-    assert len(data["agents"]) == 10, "❌ 回測輸出應包含 1 基準對照組 + 9 大 Agents 策略！"
+    # 驗證包含 #0 Benchmark 在內共有 11 個策略 (1 Benchmark + 10 大 Agents)
+    assert len(data["agents"]) == 11, "❌ 回測輸出應包含 1 基準對照組 + 10 大 Agents 策略！"
+    assert "A10_ADAPTIVE_REFLEXION" in data, "❌ 回測輸出應包含 A10_ADAPTIVE_REFLEXION 專屬節點！"
     
     benchmark_agent = next(a for a in data["agents"] if a["agent_id"] == "Agent_0")
     assert benchmark_agent["name"] == "#0_BENCHMARK_BUY_HOLD"
@@ -235,3 +236,126 @@ def test_champion_selection_and_tie_breaker():
     assert sorted_tied[0]["name"] == "A8_TOP_DEFENSE_MODERATE", "同分時應優先選擇 A8"
     assert sorted_tied[1]["name"] == "A9_TOP_DEFENSE_CONSERVATIVE", "次選應為 A9"
     assert sorted_tied[2]["name"] == "A7_TOP_DEFENSE_AGGRESSIVE", "再者應為 A7"
+
+
+
+def test_a10_mfe_and_profit_giveback_reflection_trigger():
+    """
+    A10 DoD 3: 利潤回吐偵測 (Failure Mode Detection)
+    - 追蹤 MFE = max(High - EntryPrice) / EntryPrice
+    - 當 MFE >= +7.0% 且最終實現報酬率 ROI <= +2.0% 時，觸發 reflective_lock = True
+    - 反向對照：MFE < 7.0% 或 ROI > 2.0% 時，不觸發反思 (reflective_lock = False)
+    """
+    # 1. 嚴重利潤回吐案例：進場 100，最高 108 (MFE = +8% >= 7%)，平倉賣出 101.5 (ROI = +1.5% <= 2%)
+    mfe_trigger = (108.0 - 100.0) / 100.0
+    roi_trigger = (101.5 - 100.0) / 100.0
+    assert StrategyPolicyEngine.evaluate_a10_reflection_trigger(mfe=mfe_trigger, roi=roi_trigger) is True
+    
+    # 2. 對照組 A：MFE 未達標 (最高 105，MFE = +5% < 7%)，ROI = 1.0% <= 2%
+    mfe_low = (105.0 - 100.0) / 100.0
+    roi_low = (101.0 - 100.0) / 100.0
+    assert StrategyPolicyEngine.evaluate_a10_reflection_trigger(mfe=mfe_low, roi=roi_low) is False
+    
+    # 3. 對照組 B：MFE 達標 (最高 110，MFE = +10% >= 7%)，但利潤順利落袋 (ROI = +6.0% > 2%)
+    mfe_high = (110.0 - 100.0) / 100.0
+    roi_high = (106.0 - 100.0) / 100.0
+    assert StrategyPolicyEngine.evaluate_a10_reflection_trigger(mfe=mfe_high, roi=roi_high) is False
+
+
+def test_a10_adaptive_trailing_stop_exit():
+    """
+    A10 DoD 4: 自適應移動鎖利防守 (Adaptive Trailing Stop)
+    - 當 active_in_reflection == True 時：
+      若持倉期間未實現獲利曾達到 >= +5.0% (MFE >= 0.05)
+      一旦股價自最高點回檔幅度 > 3.5% ((max_high - close) / max_high > 0.035)
+      當日立即觸發全數平倉出場，原因為 EXIT_TRAILING_LOCK
+    """
+    # 案例 1：進場 100，最高 106 (MFE = 6% >= 5%)，今日收盤 102 (回檔 (106-102)/106 = 3.77% > 3.5%)
+    should_exit, reason = StrategyPolicyEngine.evaluate_a10_trailing_lock(
+        current_max_high=106.0,
+        close=102.0,
+        entry_price=100.0,
+        active_in_reflection=True
+    )
+    assert should_exit is True
+    assert reason == "EXIT_TRAILING_LOCK"
+    
+    # 案例 2：未滿足反思狀態 (active_in_reflection == False)，即便回檔也不應觸發移動鎖利
+    should_exit_inactive, _ = StrategyPolicyEngine.evaluate_a10_trailing_lock(
+        current_max_high=106.0,
+        close=102.0,
+        entry_price=100.0,
+        active_in_reflection=False
+    )
+    assert should_exit_inactive is False
+    
+    # 案例 3：反思狀態下，未實現獲利未曾達 +5% (最高 104，MFE = 4% < 5%)，即便回檔也不啟動移動鎖利
+    should_exit_not_5pct, _ = StrategyPolicyEngine.evaluate_a10_trailing_lock(
+        current_max_high=104.0,
+        close=100.0,
+        entry_price=100.0,
+        active_in_reflection=True
+    )
+    assert should_exit_not_5pct is False
+    
+    # 案例 4：反思狀態下達標 6%，但回檔僅 1.88% <= 3.5%，不觸發出場
+    should_exit_minor_pullback, _ = StrategyPolicyEngine.evaluate_a10_trailing_lock(
+        current_max_high=106.0,
+        close=104.0,
+        entry_price=100.0,
+        active_in_reflection=True
+    )
+    assert should_exit_minor_pullback is False
+
+
+def test_a10_single_trade_reset_and_backtest_flow():
+    """
+    A10 DoD 5 & Edge Cases:
+    - 驗證單筆重置機制：反思鎖利機制僅在下一筆交易生效 1 次；該筆交易平倉後強制重置回 False。
+    - 首筆交易初始狀態固定為 reflective_lock = False。
+    """
+    from src.simulate_agents import run_agent_backtest
+    
+    a10_cfg = next(cfg for cfg in AGENT_CONFIGS if cfg.agent_id == "Agent_10")
+    assert a10_cfg.name == "A10_ADAPTIVE_REFLEXION"
+    assert a10_cfg.tactical_group == "TOP_DEFENSE"
+    assert a10_cfg.risk_profile == "MODERATE"
+    
+    # 構造一個小型行情序列驗證：
+    # Trade 1: 進場 -> 衝高至 +8% -> 暴跌平倉 (ROI = -10%) -> 觸發 reflective_lock = True
+    # Trade 2: 建立反思持倉 -> 衝高至 +6% -> 回檔 3.77% -> 觸發 EXIT_TRAILING_LOCK -> 平倉後重置 reflective_lock = False
+    dates = pd.date_range("2026-01-01", periods=20)
+    
+    closes = [
+        100.0, 101.0, 102.0, 107.0, 106.0, 105.0, 90.0,
+        91.0, 92.0, 93.0,
+        100.0, 106.0, 102.0,
+        102.0, 103.0, 103.0, 103.0, 103.0, 103.0, 103.0
+    ]
+    highs = [
+        100.0, 101.0, 103.0, 108.0, 107.0, 106.0, 92.0,
+        91.0, 92.0, 93.0,
+        100.0, 106.0, 106.0,
+        102.0, 103.0, 103.0, 103.0, 103.0, 103.0, 103.0
+    ]
+    lows = [c - 1.0 for c in closes]
+    opens = closes[:]
+    probs = [0.80 if i in [0, 10] else 0.50 for i in range(20)]
+    z_scores = [0.0] * 20
+    
+    df_test = pd.DataFrame({
+        'Date': dates,
+        'Close': closes,
+        'High': highs,
+        'Low': lows,
+        'Open': opens,
+        'AI_Probability': probs,
+        'Z_Score_BIAS': z_scores
+    })
+    
+    res = run_agent_backtest(df_test, a10_cfg)
+    assert res["total_trades"] >= 2
+    journals = res["journals"]
+    trailing_exits = [j for j in journals if j.get("action") == "SELL" and j.get("reason") == "EXIT_TRAILING_LOCK"]
+    assert len(trailing_exits) >= 1, "❌ Trade 2 應成功觸發 EXIT_TRAILING_LOCK！"
+    assert res["reflective_lock"] is False, "❌ 單筆反思結束後 reflective_lock 必須重置為 False！"

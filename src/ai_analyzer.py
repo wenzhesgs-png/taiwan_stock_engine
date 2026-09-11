@@ -4,6 +4,12 @@ import json
 import time
 from google import genai
 from google.genai import types
+from pathlib import Path
+from dotenv import load_dotenv
+
+# 明確指定往上一層找根目錄的 .env，杜絕任何工作目錄偏差
+env_path = Path(__file__).resolve().parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # 動作中文映射字典
 ACTION_CHINESE_MAP = {
@@ -179,7 +185,13 @@ def run_ai_analysis(
 
     # Lazy Init of genai.Client (Timeout 60.0s / 60000ms via types.HttpOptions)
     try:
-        client = genai.Client(api_key=current_key, http_options=types.HttpOptions(timeout=60000))
+        client = genai.Client(
+            api_key=current_key,
+            http_options=types.HttpOptions(
+                api_version="v1alpha",
+                timeout=60000
+            )
+        )
     except Exception as e:
         print(f"[ERROR] Failed to initialize Gemini Client: {type(e).__name__} - {e}", file=sys.stderr)
         raise e
@@ -247,35 +259,34 @@ def run_ai_analysis(
     }}
     """
 
-    # 8. 主備雙模型動態降級機制 (Primary-to-Fallback Cascade)
+    # 8. 三重階梯動態降級機制 (Cascade: 3.8 -> 3.7 -> 3.6)
+    models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash']
     response = None
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.7-flash',
-            contents=user_prompt.strip(),
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
-            ),
-        )
-    except Exception as e1:
-        print(f"⚠️ [Warning] Primary model (gemini-3.7-flash) failed: {type(e1).__name__} - {e1}. "
-              "Switching to fallback model (gemini-3.6-flash)...", file=sys.stderr)
-        time.sleep(2)
+    last_exception = None
+
+    for idx, model_name in enumerate(models):
         try:
             response = client.models.generate_content(
-                model='gemini-3.6-flash',
+                model=model_name,
                 contents=user_prompt.strip(),
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     temperature=0.7,
                 ),
             )
-        except Exception as e2:
-            print(f"[ERROR] Gemini API Failed on both primary and fallback models: {type(e2).__name__} - {e2}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
-            raise e2
+            break
+        except Exception as e:
+            last_exception = e
+            if idx < len(models) - 1:
+                next_model = models[idx + 1]
+                print(f"⚠️ [Warning] Model ({model_name}) failed: {type(e).__name__} - {e}. "
+                      f"Switching to fallback model ({next_model})...", file=sys.stderr)
+                time.sleep(2)
+            else:
+                print(f"[ERROR] Gemini API Failed on all candidate models: {type(e).__name__} - {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                raise last_exception
 
     # 9. 解析並修剪 JSON 數據
     try:
