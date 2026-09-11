@@ -5,11 +5,13 @@ import time
 from google import genai
 from google.genai import types
 from pathlib import Path
-from dotenv import load_dotenv
-
-# 明確指定往上一層找根目錄的 .env，杜絕任何工作目錄偏差
-env_path = Path(__file__).resolve().parent.parent / '.env'
-load_dotenv(dotenv_path=env_path)
+# 明確指定往上一層找根目錄的 .env，雲端未安裝 dotenv 則自動跳過
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).resolve().parent.parent / '.env'
+    load_dotenv(dotenv_path=env_path)
+except ImportError:
+    pass
 
 # 動作中文映射字典
 ACTION_CHINESE_MAP = {
