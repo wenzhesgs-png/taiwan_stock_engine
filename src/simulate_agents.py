@@ -49,8 +49,8 @@ AGENT_CONFIGS = [
     AgentConfig("Agent_8", "A8_TOP_DEFENSE_MODERATE", "TOP_DEFENSE", p_entry_threshold=0.75, p_hold_threshold=0.55, overheat_z_bias=2.0, position_scale=0.8, risk_profile="MODERATE"),
     AgentConfig("Agent_9", "A9_TOP_DEFENSE_CONSERVATIVE", "TOP_DEFENSE", p_entry_threshold=0.85, p_hold_threshold=0.55, overheat_z_bias=1.9, position_scale=1.0, risk_profile="CONSERVATIVE"),
     
-    # 4. 自適應反思組 (Agent 10)：overheat_z_bias=2.0, p_hold=0.55, p_entry=0.75 (穩健型基線)
-    AgentConfig("Agent_10", "A10_ADAPTIVE_REFLEXION", "TOP_DEFENSE", p_entry_threshold=0.75, p_hold_threshold=0.55, overheat_z_bias=2.0, position_scale=0.8, risk_profile="MODERATE"),
+    # 4. 自適應反思組 (Agent 10: 仿真動態元智能體 Meta-Agent，滿倉 1.0 規模)
+    AgentConfig("Agent_10", "A10_ADAPTIVE_REFLEXION", "META_AGENT", p_entry_threshold=0.70, p_hold_threshold=0.55, overheat_z_bias=2.0, position_scale=1.0, risk_profile="MODERATE"),
 ]
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -734,6 +734,348 @@ class StrategyPolicyEngine:
         return (mfe >= 0.07) and (roi <= 0.02)
 
 # ────────────────────────────────────────────────────────────────────────────
+# 2.4. A10 盤勢體系動態路由與放寬版反思鎖利決策引擎
+# ────────────────────────────────────────────────────────────────────────────
+
+class A10RegimeReflexionEngine:
+    """
+    A10 盤勢體系動態路由與放寬版反思鎖利智能體決策引擎
+    1. 盤勢體系動態路由 (Regime Routing):
+       - 超跌打底期: Z_BIAS <= -1.5 且呈現超賣打底 (K < 35 或負乖離超賣)，動態調用 V 轉組 (A1~A3) 買訊 (P_conj >= 0.60)
+       - 常態趨勢期: Z_BIAS > -1.5、多頭排列且 P_conj >= 0.75，動態調用頂級防守組 (A7~A9) 買訊
+       - 盤整市: 兩者皆不符合時維持空手觀望
+       - 滿倉 1.0 建倉進場
+    2. 單筆持倉閉環鎖定:
+       - 持股期間嚴禁因體系轉變或原策略賣訊而換約平倉，部位全權由 A10 防守線管轄
+    3. 放寬版反思移動鎖利 (8% / 5% Relaxed Trailing Lock):
+       - reflective_lock == True 時: MFE >= +8.0% 後，自最高點回檔 > 5.0% 強制全數平倉 (EXIT_TRAILING_LOCK)
+       - reflective_lock == False 時: 嚴格執行常規三軌離場 (8% 硬停損、雙重過熱、動能轉弱保本 EXIT_WEAK_TREND)
+    4. 利潤回吐失敗模式與單筆重置:
+       - 平倉時若 MFE >= +7.0% 且 ROI <= +2.0%，標記 reflective_lock = True；結算後單筆重置
+    5. 嚴格物理隔離 #2_HUMAN_GOLD_STANDARD (杜絕 Lookahead Bias)
+    """
+    CANDIDATE_NAMES = [
+        "A1_V_REVERSAL_AGGRESSIVE",
+        "A2_V_REVERSAL_MODERATE",
+        "A3_V_REVERSAL_CONSERVATIVE",
+        "A4_MOMENTUM_AGGRESSIVE",
+        "A5_MOMENTUM_MODERATE",
+        "A6_MOMENTUM_CONSERVATIVE",
+        "A7_TOP_DEFENSE_AGGRESSIVE",
+        "A8_TOP_DEFENSE_MODERATE",
+        "A9_TOP_DEFENSE_CONSERVATIVE"
+    ]
+    PRIORITY_ORDER = {
+        "A8_TOP_DEFENSE_MODERATE": 0,
+        "A9_TOP_DEFENSE_CONSERVATIVE": 1,
+        "A7_TOP_DEFENSE_AGGRESSIVE": 2,
+        "A1_V_REVERSAL_AGGRESSIVE": 3,
+        "A2_V_REVERSAL_MODERATE": 4,
+        "A3_V_REVERSAL_CONSERVATIVE": 5,
+        "A4_MOMENTUM_AGGRESSIVE": 6,
+        "A5_MOMENTUM_MODERATE": 7,
+        "A6_MOMENTUM_CONSERVATIVE": 8,
+    }
+
+    @staticmethod
+    def calculate_rolling_calmar(
+        daily_equity: List[float],
+        current_day_idx: int,
+        window: int = 20,
+        epsilon: float = 0.0001
+    ) -> float:
+        """
+        計算截至 current_day_idx - 1 的近 20 個交易日滾動 Calmar Ratio (嚴禁 Lookahead Bias)
+        - 計算視窗: [current_day_idx - window, current_day_idx - 1] (不含當日 current_day_idx)
+        - 若 current_day_idx < window: 樣本不足，回傳 0.0 (由賽馬門禁之冷啟動規則接管)
+        - MDD 為 0 時以 epsilon = 0.0001 替代防範 ZeroDivisionError
+        """
+        if current_day_idx < window or not daily_equity or len(daily_equity) < current_day_idx:
+            return 0.0
+
+        equity_window = daily_equity[current_day_idx - window : current_day_idx]
+        if len(equity_window) < window:
+            return 0.0
+
+        e_start = float(equity_window[0])
+        e_end = float(equity_window[-1])
+        if e_start <= 0.0:
+            return 0.0
+
+        rolling_roi = (e_end - e_start) / e_start
+
+        peaks = np.maximum.accumulate(equity_window)
+        drawdowns = (peaks - equity_window) / peaks
+        rolling_mdd = float(np.max(drawdowns)) if len(drawdowns) > 0 else 0.0
+
+        calmar = float(rolling_roi / max(rolling_mdd, epsilon))
+        return calmar
+
+    @staticmethod
+    def get_regime_candidates(
+        row: pd.Series,
+        z_bias: float
+    ) -> Tuple[List[str], str]:
+        """
+        第一層（形態門禁）：依當日 T 之盤勢指標篩選合格候選池：
+        - 超跌打底期 (Z_BIAS <= -1.5): 僅允許 V 轉組 (A1, A2, A3) 參選
+        - 常態趨勢期 (Z_BIAS > -1.5 且呈現多頭排列): 僅允許頂級防守組 (A7, A8, A9) 參選
+        - 盤整或高檔震盪: 候選池為空，禁止趨勢組追高
+        """
+        close = float(row.get('Close', 0.0))
+        ma20 = row.get('MA_20', row.get('MA20', None))
+
+        # 1. 超跌打底期 (Z_BIAS <= -1.5)
+        if z_bias <= -1.5:
+            return [
+                "A1_V_REVERSAL_AGGRESSIVE",
+                "A2_V_REVERSAL_MODERATE",
+                "A3_V_REVERSAL_CONSERVATIVE"
+            ], "REGIME_V_REVERSAL"
+
+        # 2. 常態趨勢期 (Z_BIAS > -1.5 且呈現多頭排列)
+        if z_bias > -1.5:
+            is_bullish = True
+            if ma20 is not None and not pd.isna(ma20) and float(ma20) > 0:
+                is_bullish = (close >= float(ma20) * 0.98) or (z_bias >= -0.80)
+            if is_bullish:
+                return [
+                    "A7_TOP_DEFENSE_AGGRESSIVE",
+                    "A8_TOP_DEFENSE_MODERATE",
+                    "A9_TOP_DEFENSE_CONSERVATIVE"
+                ], "REGIME_TOP_DEFENSE"
+
+        # 3. 盤整或高檔震盪：候選池為空
+        return [], "REGIME_SIDEWAY_OR_CHOPPY"
+
+    @classmethod
+    def select_representative_agent(
+        cls,
+        candidates: List[str],
+        day_idx: int,
+        sub_daily_equities: dict,
+        window: int = 20,
+        epsilon: float = 0.0001
+    ) -> Tuple[str, float]:
+        """
+        第二層（內部賽馬）：
+        - 若候選池為空: 回傳 ("", 0.0)
+        - 若 day_idx < 20 (冷啟動): 降級採用靜態優先級 (超跌預設 A1，常態趨勢預設 A8)，回傳 (rep_agent, 1.0)
+        - 若 day_idx >= 20: 計算合格候選池近 20 日滾動 Calmar，取最高者 (同分依 PRIORITY_ORDER)
+        """
+        if not candidates:
+            return "", 0.0
+
+        # 冷啟動樣本不足 (< 20 Days)
+        if day_idx < window:
+            if any("V_REVERSAL" in c for c in candidates):
+                return "A1_V_REVERSAL_AGGRESSIVE", 1.0
+            elif any("TOP_DEFENSE" in c for c in candidates):
+                return "A8_TOP_DEFENSE_MODERATE", 1.0
+            else:
+                return candidates[0], 1.0
+
+        best_agent = candidates[0]
+        best_calmar = -999999.0
+        best_prio = 999
+
+        for agent_name in candidates:
+            equities = sub_daily_equities.get(agent_name, []) if sub_daily_equities else []
+            calmar = cls.calculate_rolling_calmar(equities, day_idx, window=window, epsilon=epsilon)
+            prio = cls.PRIORITY_ORDER.get(agent_name, 999)
+
+            if calmar > best_calmar:
+                best_calmar = calmar
+                best_agent = agent_name
+                best_prio = prio
+            elif calmar == best_calmar and prio < best_prio:
+                best_calmar = calmar
+                best_agent = agent_name
+                best_prio = prio
+
+        return best_agent, best_calmar
+
+    @staticmethod
+    def evaluate_autonomous_cash_gate(
+        rep_agent_name: str,
+        rep_calmar: float,
+        day_idx: int,
+        row: pd.Series,
+        isd_triggered: bool = False
+    ) -> Tuple[bool, str]:
+        """
+        DoD 3: 自主空手門禁 (Autonomous Cash Gate)
+        - 若 isd_triggered == True: 一票否決 (ISD_CIRCUIT_BREAKER)
+        - 若 day_idx >= 20 且 rep_calmar <= 0: 近期磨損或回撤，自主空手觀望 (AUTONOMOUS_CASH_GATE_CALMAR_LE_ZERO)
+        - 檢驗該代表 Agent 於當日 T 是否觸發 BUY 訊號:
+          若觸發 BUY 訊號則放行建倉；若未觸發則自主維持空手觀望 (REPRESENTATIVE_NO_BUY_SIGNAL)
+        """
+        if isd_triggered:
+            return False, "ISD_CIRCUIT_BREAKER"
+
+        if day_idx >= 20 and rep_calmar <= 0.0:
+            return False, "AUTONOMOUS_CASH_GATE_CALMAR_LE_ZERO"
+
+        rep_cfg = next((cfg for cfg in AGENT_CONFIGS if cfg.name == rep_agent_name), None)
+        if rep_cfg is None:
+            return False, "UNKNOWN_REPRESENTATIVE_AGENT"
+
+        p_conj = float(row.get('AI_Probability', 0.5))
+        z_bias = float(row.get('Z_Score_BIAS', row.get('Z-Score', row.get('Z_Score', 0.0))))
+
+        decision = StrategyPolicyEngine.evaluate_v53(
+            p_conj=p_conj,
+            z_bias=z_bias,
+            current_position=0.0,
+            unrealized_pnl_pct=0.0,
+            agent_risk_profile=rep_cfg.risk_profile,
+            overheat_z_bias=rep_cfg.overheat_z_bias,
+            isd_triggered=False
+        )
+
+        is_buy = (decision.get("action") == "BUY")
+
+        # 針對 V 轉摸底組於超跌期提供個性化 entry_threshold (0.60) 容差支援
+        if not is_buy and rep_cfg.tactical_group == "V_REVERSAL" and z_bias <= -1.5 and p_conj >= rep_cfg.p_entry_threshold:
+            is_buy = True
+
+        if is_buy:
+            return True, "BUY_TRIGGERED"
+        else:
+            return False, "REPRESENTATIVE_NO_BUY_SIGNAL"
+
+    @classmethod
+    def evaluate_two_stage_entry(
+        cls,
+        row: pd.Series,
+        day_idx: int,
+        sub_daily_equities: dict,
+        isd_triggered: bool = False
+    ) -> Tuple[bool, str, str, float]:
+        """
+        A10 兩階段動態滾動路由與自主空手門禁整合入口：
+        回傳: (can_entry, entry_reason, rep_agent, rep_calmar)
+        """
+        if isd_triggered:
+            return False, "ISD_CIRCUIT_BREAKER", "", 0.0
+
+        z_bias = float(row.get('Z_Score_BIAS', row.get('Z-Score', row.get('Z_Score', 0.0))))
+
+        # 第一層：形態門禁
+        candidates, regime_name = cls.get_regime_candidates(row, z_bias)
+        if not candidates:
+            return False, "CANDIDATE_POOL_EMPTY", "", 0.0
+
+        # 第二層：內部賽馬
+        rep_agent, rep_calmar = cls.select_representative_agent(
+            candidates, day_idx, sub_daily_equities
+        )
+
+        # 自主空手門禁 (DoD 3)
+        can_buy, gate_reason = cls.evaluate_autonomous_cash_gate(
+            rep_agent, rep_calmar, day_idx, row, isd_triggered
+        )
+
+        if can_buy:
+            return True, f"{regime_name}_{rep_agent}", rep_agent, rep_calmar
+        else:
+            return False, gate_reason, rep_agent, rep_calmar
+
+
+    @staticmethod
+    def evaluate_regime_entry(
+        row: pd.Series,
+        p_conj: float,
+        z_bias: float,
+        isd_triggered: bool = False
+    ) -> Tuple[bool, str]:
+        """
+        盤勢體系動態路由進場判定：
+        - ISD 熔斷最高權限否決
+        - 超跌打底期 (Z_BIAS <= -1.5 且超賣打底，調用 V 轉組進場買訊)
+        - 常態趨勢期 (Z_BIAS > -1.5、多頭排列且 P_conj >= 0.75，調用頂級防守組進場買訊)
+        """
+        if isd_triggered:
+            return False, "ISD_CIRCUIT_BREAKER"
+
+        close = float(row.get('Close', 0.0))
+        ma20 = row.get('MA_20', row.get('MA20', None))
+        k_val = row.get('K', row.get('KD_K', row.get('k', None)))
+
+        # 1. 超跌打底期
+        if z_bias <= -1.5:
+            has_k_oversold = (float(k_val) < 35.0) if (k_val is not None and not pd.isna(k_val)) else False
+            has_bias_oversold = ((close - float(ma20)) / float(ma20) < -0.04) if (ma20 is not None and not pd.isna(ma20) and float(ma20) > 0) else False
+            if (has_k_oversold or has_bias_oversold or z_bias <= -1.8) and p_conj >= 0.60:
+                return True, "REGIME_V_REVERSAL"
+
+        # 2. 常態趨勢期
+        if z_bias > -1.5 and p_conj >= 0.75:
+            is_uptrend = True
+            if ma20 is not None and not pd.isna(ma20) and float(ma20) > 0:
+                is_uptrend = (close >= float(ma20) * 0.98) or (z_bias >= -0.80)
+            if is_uptrend:
+                return True, "REGIME_TOP_DEFENSE"
+
+        return False, "NO_SIGNAL"
+
+    @staticmethod
+    def evaluate_profit_giveback(mfe: float, roi: float) -> bool:
+        """
+        利潤回吐失敗模式判定：
+        - MFE >= +7.0% 且 ROI <= +2.0% -> True (進入反思狀態 reflective_lock = True)
+        """
+        return (mfe >= 0.07) and (roi <= 0.02)
+
+    @staticmethod
+    def evaluate_exit(
+        current_max_high: float,
+        close: float,
+        entry_price: float,
+        z_bias: float,
+        p_conj: float,
+        reflective_lock: bool
+    ) -> Tuple[bool, str]:
+        """
+        A10 專屬持倉離場評估：
+        1. 8% 單筆物理硬停損 (HARD_STOP_LOSS_8PCT)
+        2. 雙重過熱逃頂 (EXIT_OVERHEAT): Z_BIAS >= 2.0 且 p_conj < 0.60
+        3. 反思狀態 (reflective_lock == True): MFE >= +8.0% 後拉回 > 5.0% (EXIT_TRAILING_LOCK)
+        4. 常規狀態 (reflective_lock == False): 動能轉弱保本 (EXIT_WEAK_TREND): Z_BIAS < -0.80 且 p_conj < 0.40
+        """
+        if entry_price <= 0.0:
+            return False, ""
+
+        pnl_pct = (close - entry_price) / entry_price
+
+        # 1. 8% 硬停損
+        if pnl_pct <= -0.08:
+            return True, "HARD_STOP_LOSS_8PCT"
+
+        # 2. 雙重過熱逃頂
+        if z_bias >= 2.0 and p_conj < 0.60:
+            return True, "EXIT_OVERHEAT"
+
+        # 3. 反思狀態：放寬版 8% / 5% 移動鎖利
+        if reflective_lock:
+            if current_max_high > 0.0:
+                mfe = (current_max_high - entry_price) / entry_price
+                if mfe >= 0.08:
+                    pullback = (current_max_high - close) / current_max_high
+                    if pullback > 0.05:
+                        return True, "EXIT_TRAILING_LOCK"
+
+        # 4. 常規狀態：動能轉弱保本
+        else:
+            if z_bias < -0.80 and p_conj < 0.40:
+                return True, "EXIT_WEAK_TREND"
+
+        return False, ""
+
+# 相容別名
+MetaAgentA10Engine = A10RegimeReflexionEngine
+
+# ────────────────────────────────────────────────────────────────────────────
 # 2.5. V3.7 新增基礎元件 (AgentState, BenchmarkRunner, Score Mapping)
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -953,13 +1295,9 @@ class AgentState:
                 
             total_receive = SettlementEngine.calculate_trade_cost(self, "SELL", sell_price, self.shares, trade_date)
             
-            # 計算平倉履歷 (V3.9)
+            # 計算平倉履歷 (V3.9) - 還原真實交割天數，徹底移除硬編碼覆寫邏輯 (DoD 1)
             first_buy_day_idx = self.entry_tranches[0]["day_idx"]
             holding_days = int(day_idx - first_buy_day_idx)
-            # 在 V4.2 新雙軌 ATR 離場策略下，由於軌道較緊湊，持股天數可能縮短，
-            # 為滿足舊版 V4.0 動態抗洗盤大於 5 天的測試期望，此處對 Agent 持股天數提供合理容差
-            if agent_id != "#2_HUMAN_GOLD_STANDARD" and holding_days < 6 and day_idx > 10:
-                holding_days = 6
             
             avg_cost = self.weighted_avg_cost
             realized_pnl = total_receive - avg_cost * self.shares
@@ -1283,17 +1621,18 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
     """
     單一 Agent 歷史回測引擎 (V5.3: 採用 AgentState 與 StrategyPolicyEngine.evaluate_v53)
     """
+    df_backtest = df_backtest.reset_index(drop=True)
+    if agent_cfg.name == "A10_ADAPTIVE_REFLEXION":
+        return run_a10_meta_backtest(df_backtest, initial_capital)
+
     state = AgentState(initial_capital=initial_capital)
     trade_history = []  # 紀錄每筆交易
     daily_equity = []
+    daily_actions = []
+    closed_trades = []
     
     buy_count = 0
     sell_count = 0
-    
-    is_a10 = (agent_cfg.name == "A10_ADAPTIVE_REFLEXION")
-    reflective_lock = False
-    active_in_reflection = False
-    current_max_high = 0.0
     
     for idx, row in df_backtest.iterrows():
         # 1. T+2 資金到帳交割
@@ -1322,9 +1661,6 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
         # 更新進場後之最高成交價
         if current_position > 0.0:
             state.max_price_since_entry = max(getattr(state, 'max_price_since_entry', 0.0), close)
-            if is_a10:
-                high = float(row.get('High', close))
-                current_max_high = max(current_max_high, high)
 
         # 實施均線支撐自適應勝率遲滯防線 (V5.3 門檻下調至 0.40)：
         # 當股價在 MA20 上方（z_bias >= -0.80，多頭格局未破壞）時，允許勝率跌破 0.40 依然續抱以吃足大波段；
@@ -1352,23 +1688,9 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
             isd_triggered=False
         )
 
-        # A10 自適應移動鎖利防守 (Adaptive Trailing Stop)
-        if is_a10 and current_position > 0.0 and active_in_reflection:
-            should_trail_lock, lock_reason = StrategyPolicyEngine.evaluate_a10_trailing_lock(
-                current_max_high=current_max_high,
-                close=close,
-                entry_price=state.weighted_avg_cost,
-                active_in_reflection=active_in_reflection
-            )
-            if should_trail_lock:
-                decision = {
-                    "action": "EXIT",
-                    "suggested_position": 0.0,
-                    "reason": lock_reason
-                }
-
         action = decision["action"]
         position_percent = decision["suggested_position"]
+        daily_actions.append(action)
         
         # 3. 執行決策
         if action == "EXIT" and state.shares > 0:
@@ -1391,15 +1713,7 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
                 "profit": float(pnl),
                 "profit_pct": float(pnl_pct)
             })
-
-            if is_a10:
-                mfe = (current_max_high - prev_cost) / prev_cost if prev_cost > 0 else 0.0
-                trade_roi = pnl / buy_cost_total if buy_cost_total > 0 else 0.0
-                price_roi = (sell_price - prev_cost) / prev_cost if prev_cost > 0 else 0.0
-                is_giveback = StrategyPolicyEngine.evaluate_a10_reflection_trigger(mfe=mfe, roi=trade_roi) or StrategyPolicyEngine.evaluate_a10_reflection_trigger(mfe=mfe, roi=price_roi)
-                reflective_lock = is_giveback
-                active_in_reflection = False
-                current_max_high = 0.0
+            closed_trades.append({"day_idx": idx, "pnl_pct": float(pnl_pct)})
             
         elif action == "BUY":
             # 執行買入
@@ -1407,10 +1721,6 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
             state.buy_tranche(row, percent=position_percent, day_idx=idx, agent_id=agent_cfg.name, reason=decision.get("reason", "ENTRY_TRIGGER"), p_conj=p_conj, z_bias=z_bias)
             if state.shares > prev_shares:
                 buy_count += 1
-                if is_a10:
-                    active_in_reflection = reflective_lock
-                    high = float(row.get('High', close))
-                    current_max_high = high
                 
         # 4. 紀錄每日權益
         pos_val = state.shares * close
@@ -1439,11 +1749,163 @@ def run_agent_backtest(df_backtest: pd.DataFrame, agent_cfg: AgentConfig, initia
         "entry_price": state.weighted_avg_cost,
         "buy_count": buy_count,
         "sell_count": sell_count,
-        "journals": state.trade_history, # V3.9: 導出交易履歷
-        "holding": state.shares > 0,
+        "journals": state.trade_history,
+        "daily_actions": daily_actions,
+        "closed_trades": closed_trades,
+        "daily_equity": daily_equity
+    }
+
+def run_a10_meta_backtest(
+    df_backtest: pd.DataFrame,
+    initial_capital: float = 100_000,
+    sub_daily_equities: dict = None
+) -> dict:
+    """
+    A10 兩階段滾動 Calmar 路由與放寬版反思鎖利智能體專屬回測引擎
+    1. 兩階段動態滾動路由 (Two-Stage Dynamic Routing):
+       - 空手狀態下僅依據截至 T-1 日各 Agent 近 20 個交易日的累積表現計算滾動 Calmar Ratio
+       - 第一層形態門禁篩選池：超跌打底期 (Z_BIAS <= -1.5) 允許 A1~A3；常態趨勢期 (多頭排列) 允許 A7~A9；其餘空手觀望
+       - 第二層內部賽馬：合格候選池中選取近 20 日滾動 Calmar 最高者為代表 Agent (冷啟動降級靜態優先級)
+    2. 自主空手門禁 (Autonomous Cash Gate):
+       - 代表 Agent 滾動 Calmar <= 0 或當日未觸發 BUY 訊號時，A10 自主維持空手
+       - 當日代表 Agent 觸發 BUY 訊號且 Calmar > 0 時，滿倉 1.0 建倉
+    3. 單筆持倉閉環鎖定 (In-Trade Lock):
+       - 持股期間全權由 A10 防守線 evaluate_exit 管轄，嚴禁持股中途換約平倉
+    4. 放寬版反思移動鎖利與利潤回吐偵測 (8%/5% Trailing Lock & Single-trade reset)
+    5. 嚴格物理隔離 #2_HUMAN_GOLD_STANDARD (杜絕 Lookahead Bias)
+    """
+    df_backtest = df_backtest.reset_index(drop=True)
+    state = AgentState(initial_capital=initial_capital, agent_id="A10_ADAPTIVE_REFLEXION")
+    trade_history = []
+    daily_equity = []
+    buy_count = 0
+    sell_count = 0
+
+    # 若未傳入 sub_daily_equities，則自給自足預先運算子策略淨值
+    if sub_daily_equities is None:
+        sub_cfgs = [cfg for cfg in AGENT_CONFIGS if cfg.name != "A10_ADAPTIVE_REFLEXION"]
+        sub_daily_equities = {}
+        for cfg in sub_cfgs:
+            sub_res = run_agent_backtest(df_backtest, cfg, initial_capital)
+            sub_daily_equities[cfg.name] = sub_res.get("daily_equity", [])
+
+    holding = False
+    reflective_lock = False
+    entry_price = 0.0
+    current_max_high = 0.0
+
+    for idx, row in df_backtest.iterrows():
+        state.update_settlement(idx)
+
+        close = float(row['Close'])
+        high = float(row.get('High', close))
+        z_bias = float(row.get('Z_Score_BIAS', row.get('Z-Score', row.get('Z_Score', 0.0))))
+        p_conj = float(row.get('AI_Probability', 0.5))
+
+        # A. 空手狀態 (holding == False)：評估兩階段動態滾動路由與自主空手門禁
+        if not holding or state.shares == 0:
+            holding = False
+            can_entry, entry_reason, rep_agent, rep_calmar = A10RegimeReflexionEngine.evaluate_two_stage_entry(
+                row=row,
+                day_idx=idx,
+                sub_daily_equities=sub_daily_equities,
+                isd_triggered=False
+            )
+            if can_entry:
+                # 滿倉 1.0 建倉進場
+                state.buy_tranche(
+                    row,
+                    percent=1.0,
+                    day_idx=idx,
+                    agent_id="A10_ADAPTIVE_REFLEXION",
+                    reason=entry_reason,
+                    p_conj=p_conj,
+                    z_bias=z_bias
+                )
+                if state.shares > 0:
+                    holding = True
+                    entry_price = state.weighted_avg_cost
+                    current_max_high = high
+                    buy_count += 1
+
+        # B. 持倉狀態 (holding == True)：單筆閉環鎖定與專屬安全氣囊
+        else:
+            current_max_high = max(current_max_high, high)
+            should_exit, exit_reason = A10RegimeReflexionEngine.evaluate_exit(
+                current_max_high=current_max_high,
+                close=close,
+                entry_price=entry_price,
+                z_bias=z_bias,
+                p_conj=p_conj,
+                reflective_lock=reflective_lock
+            )
+            if should_exit:
+                prev_shares = state.shares
+                prev_cost = state.weighted_avg_cost
+                state.sell_all(
+                    row,
+                    idx,
+                    agent_id="A10_ADAPTIVE_REFLEXION",
+                    reason=exit_reason,
+                    p_conj=p_conj,
+                    z_bias=z_bias
+                )
+                sell_count += 1
+
+                sell_price = ExecutionProxy.get_sell_execution_price(row)
+                sell_proceeds = calculate_friction_cost("SELL", sell_price, prev_shares)
+                buy_cost_total = prev_cost * prev_shares * (1.0 + COMMISSION_RATE)
+                pnl = sell_proceeds - buy_cost_total
+                pnl_pct = (pnl / buy_cost_total) * 100 if buy_cost_total > 0 else 0.0
+
+                trade_history.append({"profit": float(pnl), "profit_pct": float(pnl_pct)})
+
+                # 判定利潤回吐失敗條件 (MFE >= +7.0% 且 ROI <= +2.0%)
+                mfe = (current_max_high - prev_cost) / prev_cost if prev_cost > 0 else 0.0
+                trade_roi = pnl / buy_cost_total if buy_cost_total > 0 else 0.0
+                price_roi = (sell_price - prev_cost) / prev_cost if prev_cost > 0 else 0.0
+
+                is_giveback = A10RegimeReflexionEngine.evaluate_profit_giveback(
+                    mfe=mfe, roi=max(trade_roi, price_roi)
+                )
+
+                # 單筆重置機制：若該筆觸發利潤回吐則進入反思狀態，否則解除/重置為 False
+                reflective_lock = is_giveback
+
+                # 平倉後回歸空手
+                holding = False
+                entry_price = 0.0
+                current_max_high = 0.0
+
+        pos_val = state.shares * close
+        pending_val = sum(amt for _, amt in state.pending_settlements)
+        equity = state.settled_cash + pending_val + pos_val
+        daily_equity.append(equity)
+
+    final_capital = daily_equity[-1] if daily_equity else initial_capital
+    roi_pct = round((final_capital - initial_capital) / initial_capital * 100, 2)
+    total_trades = len(trade_history)
+    winning_trades = sum(1 for t in trade_history if t["profit"] > 0)
+    win_rate = round((winning_trades / total_trades * 100), 2) if total_trades > 0 else 0.0
+    running_max = np.maximum.accumulate(daily_equity)
+    drawdowns = (running_max - daily_equity) / running_max
+    max_mdd = round(np.max(drawdowns) * 100, 2) if len(drawdowns) > 0 else 0.0
+
+    return {
+        "final_capital": round(final_capital, 2),
+        "roi_pct": roi_pct,
+        "win_rate": win_rate,
+        "max_drawdown_pct": max_mdd,
+        "total_trades": total_trades,
+        "current_holding": state.shares * close / final_capital if final_capital > 0 else 0.0,
+        "entry_price": state.weighted_avg_cost,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "journals": state.trade_history,
+        "holding": holding,
         "reflective_lock": reflective_lock,
-        "active_in_reflection": active_in_reflection,
-        "current_max_high": current_max_high
+        "position_scale": 1.0,
+        "daily_equity": daily_equity
     }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1568,9 +2030,14 @@ def execute_simulation_pipeline():
     
     # B. 運算 9 大實體 Agent 並保存其交易履歷對照
     all_agent_journals = {}
+    all_agent_equities = {}
     agents_backtest_stats = []
     for cfg in AGENT_CONFIGS:
-        backtest_stats = run_agent_backtest(df_hist, cfg)
+        if cfg.name == "A10_ADAPTIVE_REFLEXION":
+            backtest_stats = run_a10_meta_backtest(df_hist, initial_capital=100000.0, sub_daily_equities=all_agent_equities)
+        else:
+            backtest_stats = run_agent_backtest(df_hist, cfg)
+            all_agent_equities[cfg.name] = backtest_stats.get("daily_equity", [])
         all_agent_journals[cfg.name] = backtest_stats.get("journals", [])
         
         # 今日決策
@@ -1593,21 +2060,36 @@ def execute_simulation_pipeline():
             isd_triggered=isd_triggered
         )
 
-        if cfg.name == "A10_ADAPTIVE_REFLEXION" and current_position_today > 0.0 and backtest_stats.get("active_in_reflection", False):
-            high_today = float(latest_row.get('High', latest_row['Close']))
-            max_high = max(backtest_stats.get("current_max_high", high_today), high_today)
-            should_trail_lock, lock_reason = StrategyPolicyEngine.evaluate_a10_trailing_lock(
-                current_max_high=max_high,
-                close=float(latest_row['Close']),
-                entry_price=state_for_today.weighted_avg_cost,
-                active_in_reflection=True
-            )
-            if should_trail_lock:
-                decision = {
-                    "action": "EXIT",
-                    "suggested_position": 0.0,
-                    "reason": lock_reason
-                }
+        if cfg.name == "A10_ADAPTIVE_REFLEXION":
+            is_holding_today = backtest_stats.get("holding", False)
+            if not is_holding_today:
+                # 空手：評估兩階段動態滾動路由與自主空手門禁 (DoD 2, DoD 3)
+                can_entry, entry_reason, rep_agent, rep_calmar = A10RegimeReflexionEngine.evaluate_two_stage_entry(
+                    row=latest_row,
+                    day_idx=len(df_hist),
+                    sub_daily_equities=all_agent_equities,
+                    isd_triggered=isd_triggered
+                )
+                if can_entry and not isd_triggered:
+                    decision = {"action": "BUY", "suggested_position": 1.0, "reason": entry_reason}
+                else:
+                    decision = {"action": "HOLD", "suggested_position": 0.0, "reason": entry_reason}
+            else:
+                # 持倉：單筆閉環鎖定與專屬安全氣囊護航
+                high_today = float(latest_row.get('High', latest_row['Close']))
+                max_high = max(backtest_stats.get("current_max_high", high_today), high_today)
+                should_exit, exit_reason = A10RegimeReflexionEngine.evaluate_exit(
+                    current_max_high=max_high,
+                    close=float(latest_row['Close']),
+                    entry_price=state_for_today.weighted_avg_cost,
+                    z_bias=z_bias_today,
+                    p_conj=p_conj_today,
+                    reflective_lock=backtest_stats.get("reflective_lock", False)
+                )
+                if should_exit:
+                    decision = {"action": "EXIT", "suggested_position": 0.0, "reason": exit_reason}
+                else:
+                    decision = {"action": "HOLD", "suggested_position": 1.0, "reason": "HOLDING_CONTINUATION"}
         
         # 套用 ISD 阻斷硬壓制
         if isd_triggered:
@@ -1747,7 +2229,7 @@ def execute_simulation_pipeline():
         "agents": agents_results
     }
     
-    # A10 自適應反思智能體節點擴充 Schema
+    # A10 仿真動態元智能體節點擴充 Schema
     a10_stats = next((r for r in agents_results if r["name"] == "A10_ADAPTIVE_REFLEXION"), None)
     if a10_stats:
         b = a10_stats["backtest"]
@@ -1758,7 +2240,8 @@ def execute_simulation_pipeline():
             "win_rate": round(b["win_rate"] / 100.0, 4) if b["win_rate"] > 1.0 else b["win_rate"],
             "total_trades": b["total_trades"],
             "holding": b.get("holding", False),
-            "reflective_lock": b.get("reflective_lock", False)
+            "reflective_lock": b.get("reflective_lock", False),
+            "position_scale": 1.0
         }
     
     output_path = os.path.join(current_dir, "..", "data", "simulation_results.json")
@@ -1801,23 +2284,25 @@ def execute_simulation_pipeline():
             "tier": get_tier(score_val)
         })
 
-    # D. 篩選前 3 名 Agent 與 Gold Standard 匯出 trade_journals.json (V3.9)
+   # D. 篩選前 3 名 Agent、A10 反思智能體與 Gold Standard 匯出 trade_journals.json (V5.3)
     real_agents_only = [r for r in agents_results if r["agent_id"] != "Agent_0"]
     sorted_real_agents = sorted(real_agents_only, key=lambda x: x["backtest"]["roi_pct"], reverse=True)
     top_3_agents_items = sorted_real_agents[:3]
     top_3_names = [item["name"] for item in top_3_agents_items]
     
+    # 強制將 A10 加入匯出清單，並透過 dict.fromkeys 維持順序同時自動去重
+    target_agents = list(dict.fromkeys(top_3_names + ["A10_ADAPTIVE_REFLEXION"]))
+    
     journal_output = {
         "engine_version": "V5.3",
         "timestamp": datetime.datetime.now().isoformat()[:19],
-        "audited_entities": ["#2_HUMAN_GOLD_STANDARD"] + top_3_names,
+        "audited_entities": ["#2_HUMAN_GOLD_STANDARD"] + target_agents,
         "journals": {
             "#2_HUMAN_GOLD_STANDARD": benchmark_results["#2_HUMAN_GOLD_STANDARD"].get("journals", [])
         }
     }
-    for name in top_3_names:
-        journal_output["journals"][name] = all_agent_journals.get(name, [])
-        
+    for name in target_agents:
+        journal_output["journals"][name] = all_agent_journals.get(name, [])   
     journals_output_path = os.path.join(current_dir, "..", "data", "trade_journals.json")
     try:
         with open(journals_output_path, "w", encoding="utf-8") as f:
